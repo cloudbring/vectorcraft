@@ -10,6 +10,9 @@ use vectorcraft_geom::{BezPath, FillRule, Point, Rect};
 
 use crate::{AppearanceItem, Document, Node, NodeId, NodeKind, SymbolBoxes};
 
+mod index;
+pub(crate) use index::HitIndex;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitKind {
     Fill,
@@ -225,19 +228,19 @@ thread_local! {
 
 /// Topmost editable object under `p`.
 pub fn hit_test(doc: &Document, p: Point, opt: HitOptions) -> Option<Hit> {
-    hit_test_skipping(doc, p, opt, &|_| false, true)
+    hit_test_skipping(doc, p, opt, &|_| false, true, true)
 }
 
 /// Topmost visible art for read-only sampling: locked objects and template layers participate,
 /// including art outside the editing scope. This never changes their editability.
 pub fn hit_test_visible(doc: &Document, p: Point, opt: HitOptions) -> Option<Hit> {
-    hit_test_skipping(doc, p, opt, &|_| false, false)
+    hit_test_skipping(doc, p, opt, &|_| false, false, true)
 }
 
 /// [`hit_test_visible`] passing over the nodes `skip` names (and their contents): what lies below
 /// them at `p`. A skipped clipping path still clips.
 pub fn hit_test_visible_skipping(doc: &Document, p: Point, opt: HitOptions, skip: &dyn Fn(NodeId) -> bool) -> Option<Hit> {
-    hit_test_skipping(doc, p, opt, skip, false)
+    hit_test_skipping(doc, p, opt, skip, false, true)
 }
 
 /// The object of `selected` (topmost first) whose own art lies under `p` where a clipping mask
@@ -392,7 +395,7 @@ fn objects_at_layer(layer: &Node, p: Point, opt: HitOptions, symbols: &SymbolBox
 fn objects_at_repeated(doc: &Document, p: Point, opt: HitOptions, scope: Option<NodeId>) -> Vec<NodeId> {
     let mut tops: Vec<NodeId> = vec![];
     // Each round leaves out the objects found so far (and everything inside them).
-    while let Some(top) = hit_test_skipping(doc, p, opt, &|id| tops.contains(&id), true).map(|h| h.top_object(scope)) {
+    while let Some(top) = hit_test_skipping(doc, p, opt, &|id| tops.contains(&id), true, true).map(|h| h.top_object(scope)) {
         if tops.contains(&top) {
             break;
         }
@@ -439,7 +442,7 @@ fn locked_children(parent: &Node, p: Point, opt: HitOptions, symbols: &SymbolBox
     if parent.clips() && children.first().is_some_and(|clip| !clip_contains(clip, p)) {
         return;
     }
-    for i in hit_order(parent, children, p) {
+    for i in hit_order(parent, children, p, opt.tol) {
         if out.len() >= MAX_LOCKED_AT {
             return;
         }
@@ -486,7 +489,8 @@ fn object_hit(n: &Node, p: Point, opt: HitOptions, symbols: &SymbolBoxes, editab
 /// `editable_only` over the objects of layers and sublayers on a locked artboard, and over all of
 /// an isolated group on one ([`crate::LockedArtboards::holds`]). Symbol instances are measured by their art
 /// ([`Node::geometric_bounds_with`]).
-fn hit_test_skipping(doc: &Document, p: Point, opt: HitOptions, skip: &dyn Fn(NodeId) -> bool, editable_only: bool) -> Option<Hit> {
+fn hit_test_skipping(doc: &Document, p: Point, opt: HitOptions, skip: &dyn Fn(NodeId) -> bool, editable_only: bool, use_index: bool) -> Option<Hit> {
+    let _index_guard = index::prepare(doc, use_index);
     let finish = |mut h: Hit| {
         h.contents_of = h.ancestry.iter().rev().copied().find(|a| doc.node(*a).is_some_and(edits_contents));
         h.layers = h.ancestry.iter().take_while(|a| doc.node(**a).is_some_and(Node::is_layer)).count();
@@ -639,7 +643,7 @@ fn hit_children(
             return None;
         }
     }
-    for i in hit_order(parent, children, p) {
+    for i in hit_order(parent, children, p, opt.tol) {
         let Some(c) = children.get(i) else { continue };
         if !may_hit(parent, i, c, p, opt, symbols, editable_only) || skip(c.id) {
             continue;
@@ -670,8 +674,17 @@ fn hit_children(
 /// The order a click at `p` tries the children of `parent` in, front first: their stacking order
 /// from the top, except that in an Intertwine group the members are tried in the order they are
 /// drawn at `p`, from the top ([`crate::intertwine::tier_at`]).
-fn hit_order<'a>(parent: &Node, children: &'a [std::sync::Arc<Node>], p: Point) -> impl Iterator<Item = usize> + 'a {
-    let mut order: Vec<usize> = (0..children.len()).rev().collect();
+fn hit_order(parent: &Node, children: &[std::sync::Arc<Node>], p: Point, tol: f64) -> impl Iterator<Item = usize> {
+    // No index (or a non-finite query): the old front-to-back order. Candidates are the same
+    // order with the boxes that miss the point left out, then Intertwine re-sorts either list.
+    let mut order = match index::point_query_rect(p, tol).and_then(|rect| index::overlapping_children(parent, rect)) {
+        Some(cands) => {
+            let mut order: Vec<usize> = cands.into_iter().filter(|i| *i < children.len()).collect();
+            order.sort_unstable_by(|a, b| b.cmp(a));
+            order
+        }
+        None => (0..children.len()).rev().collect(),
+    };
     if matches!(parent.kind, NodeKind::Intertwine { .. }) {
         let tier = |i: usize| children.get(i).map_or(0, |c| crate::intertwine::tier_at(c, p));
         order.sort_by_cached_key(|i| std::cmp::Reverse((tier(*i), *i)));
@@ -829,17 +842,66 @@ pub fn compound_part_at(n: &Node, p: Point, tol: f64) -> Option<NodeId> {
     parts.iter().filter(|(_, bp, _)| fill_contains(bp, *rule, p)).min_by(|a, b| size(&a.2).total_cmp(&size(&b.2))).map(|(id, ..)| *id)
 }
 
+/// Sibling indexes of `parent` whose reach meets `rect`, in sibling order.
+/// `None` walks every child: no index is installed, or `rect` is not finite.
+fn child_indexes(parent: &Node, len: usize, rect: Rect) -> Option<Vec<usize>> {
+    let mut ids = index::overlapping_children(parent, rect)?;
+    ids.retain(|i| *i < len);
+    ids.sort_unstable();
+    ids.dedup();
+    Some(ids)
+}
+
+fn for_each_child<'a>(parent: &'a Node, rect: Rect, mut visit: impl FnMut(usize, &'a Arc<Node>)) {
+    let Some(children) = parent.children() else { return };
+    match child_indexes(parent, children.len(), rect) {
+        Some(ids) => {
+            for i in ids {
+                if let Some(child) = children.get(i) {
+                    visit(i, child);
+                }
+            }
+        }
+        None => {
+            for (i, child) in children.iter().enumerate() {
+                visit(i, child);
+            }
+        }
+    }
+}
+
+fn any_child(parent: &Node, rect: Rect, mut pred: impl FnMut(usize, &Arc<Node>) -> bool) -> bool {
+    let Some(children) = parent.children() else { return false };
+    match child_indexes(parent, children.len(), rect) {
+        Some(ids) => ids.into_iter().any(|i| children.get(i).is_some_and(|child| pred(i, child))),
+        None => children.iter().enumerate().any(|(i, child)| pred(i, child)),
+    }
+}
+
 /// Objects (children of layers, or of `scope` in isolation mode) touched by a marquee rect, leaving
 /// out those on a locked artboard ([`crate::LockedArtboards::holds_id`]). Symbol instances are measured
 /// by their art ([`Node::geometric_bounds_with`]). The art of a clip group or of a layer with a
 /// clipping mask counts only when the marquee meets the region its clipping path clips to, and then
 /// only within that region's bounds.
 pub fn marquee(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> Vec<NodeId> {
+    marquee_inner(doc, r, scope, leaves, true)
+}
+
+fn marquee_inner(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool, use_index: bool) -> Vec<NodeId> {
+    let _index_guard = index::prepare(doc, use_index);
     let mut out = Vec::new();
     // `tops` pairs each object with the part of `r` in which the marquee can touch it.
     let tops: Vec<(&std::sync::Arc<Node>, Rect)> = match scope.and_then(|s| doc.node(s)) {
         Some(s) => match (s.children(), marquee_in(s, r)) {
-            (Some(c), Some(r)) => c.iter().enumerate().filter(|(i, _)| !shaper_hides(s, *i, scope)).map(|(_, c)| (c, r)).collect(),
+            (Some(_), Some(r)) => {
+                let mut tops = Vec::new();
+                for_each_child(s, r, |i, c| {
+                    if !shaper_hides(s, i, scope) {
+                        tops.push((c, r));
+                    }
+                });
+                tops
+            }
             (Some(_), None) => vec![],
             // A single object isolated: only it.
             (None, _) => doc
@@ -864,7 +926,7 @@ pub fn marquee(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> 
     fn layer_objects(l: &Node, r: Rect) -> Vec<(&std::sync::Arc<Node>, Rect)> {
         let mut out = vec![];
         let Some(r) = marquee_in(l, r) else { return out };
-        for c in l.children().into_iter().flatten() {
+        for_each_child(l, r, |_, c| {
             if c.is_layer() {
                 if c.visible && !c.locked && !c.is_template() {
                     out.extend(layer_objects(c, r));
@@ -872,7 +934,7 @@ pub fn marquee(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> 
             } else {
                 out.push((c, r));
             }
-        }
+        });
         out
     }
     /// Does the marquee `r` touch `n`? It skips the children of a Shaper Group that clicks skip
@@ -882,9 +944,10 @@ pub fn marquee(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> 
     fn touches(n: &Node, s: &SymbolBoxes, r: Rect, scope: Option<NodeId>) -> bool {
         match &n.kind {
             NodeKind::Path { path, .. } => vectorcraft_geom::hit::intersects_rect(path, r),
-            NodeKind::Layer { children, .. } | NodeKind::Group { children, .. } | NodeKind::Intertwine { children } => marquee_in(n, r)
-                .is_some_and(|r| children.iter().enumerate().any(|(i, c)| c.visible && !shaper_hides(n, i, scope) && touches(c, s, r, scope))),
-            NodeKind::Compound { children, .. } => children.iter().any(|c| c.visible && touches(c, s, r, scope)),
+            NodeKind::Layer { .. } | NodeKind::Group { .. } | NodeKind::Intertwine { .. } => {
+                marquee_in(n, r).is_some_and(|r| any_child(n, r, |i, c| c.visible && !shaper_hides(n, i, scope) && touches(c, s, r, scope)))
+            }
+            NodeKind::Compound { .. } => any_child(n, r, |_, c| c.visible && touches(c, s, r, scope)),
             NodeKind::Repeat(spec) => spec.expand(Some(s.document())).iter().any(|copy| touches(copy, s, r, scope)),
             // A box with no width or no height (an instance of a symbol that draws a straight
             // line) is touched where the marquee crosses it.
@@ -896,13 +959,13 @@ pub fn marquee(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> 
     }
     fn collect_leaves(n: &Node, s: &SymbolBoxes, r: Rect, scope: Option<NodeId>, out: &mut Vec<NodeId>) {
         match &n.kind {
-            NodeKind::Layer { children, .. } | NodeKind::Group { children, .. } | NodeKind::Intertwine { children } => {
+            NodeKind::Layer { .. } | NodeKind::Group { .. } | NodeKind::Intertwine { .. } => {
                 let Some(r) = marquee_in(n, r) else { return };
-                for (i, c) in children.iter().enumerate() {
+                for_each_child(n, r, |i, c| {
                     if c.visible && !c.locked && !shaper_hides(n, i, scope) {
                         collect_leaves(c, s, r, scope, out);
                     }
-                }
+                });
             }
             _ => {
                 if touches(n, s, r, scope) {
@@ -955,6 +1018,24 @@ fn marquee_in_clip(clip: &Node, r: Rect) -> Option<Rect> {
     let bounds = regions.iter().map(|(bp, _)| bp.bounding_box()).reduce(|a, b| a.union(b))?;
     Some(r.intersect(bounds))
 }
+
+#[cfg(test)]
+fn hit_test_linear(doc: &Document, p: Point, opt: HitOptions) -> Option<Hit> {
+    hit_test_skipping(doc, p, opt, &|_| false, true, false)
+}
+
+#[cfg(test)]
+fn hit_test_visible_linear(doc: &Document, p: Point, opt: HitOptions) -> Option<Hit> {
+    hit_test_skipping(doc, p, opt, &|_| false, false, false)
+}
+
+#[cfg(test)]
+fn marquee_linear(doc: &Document, r: Rect, scope: Option<NodeId>, leaves: bool) -> Vec<NodeId> {
+    marquee_inner(doc, r, scope, leaves, false)
+}
+
+#[cfg(test)]
+mod prop;
 
 #[cfg(test)]
 mod tests;

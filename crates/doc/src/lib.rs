@@ -324,6 +324,11 @@ pub struct Document {
     /// Where each node is in the tree, for lookups by id ([`id_index`]): a cache, never saved.
     #[serde(skip)]
     index: id_index::IdIndex,
+    /// Spatial index of reach boxes for hit-testing and marquees. A cache, never saved.
+    /// [`Document::node_mut`] and the other tree edits drop it, as does replacing a top-level
+    /// layer. An in-place `Arc::make_mut` that bypasses those edits is not seen.
+    #[serde(skip)]
+    hit_index: hit::HitIndex,
 }
 
 fn ppi72() -> f64 {

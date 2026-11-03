@@ -73,6 +73,7 @@ impl Document {
             dimensions,
             retired_artboard_id: _,
             index: _,
+            hit_index: _,
         } = self;
         *version == other.version
             && *title == other.title
@@ -249,6 +250,7 @@ impl Document {
             dimensions: false,
             retired_artboard_id: Default::default(),
             index: Default::default(),
+            hit_index: Default::default(),
         };
         let id = d.alloc_id();
         d.layers.push(Arc::new(Node::layer(id, "Layer 1", LayerColor::Preset(0))));
@@ -411,6 +413,8 @@ impl Document {
     /// Mutable access to the node at index path `path`; clones the Arc path (copy-on-write), as
     /// [`Document::node_mut`] does.
     pub fn node_mut_at(&mut self, path: &[usize]) -> Option<&mut Node> {
+        self.node_at(path)?;
+        self.hit_index.bump();
         let (first, rest) = path.split_first()?;
         let mut cur: &mut Arc<Node> = self.layers.get_mut(*first)?;
         for &i in rest {
@@ -461,6 +465,7 @@ impl Document {
     /// Mutable access to a node; clones the Arc path (copy-on-write).
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
         let path = self.index_path(id)?;
+        self.hit_index.bump();
         let mut cur: &mut Arc<Node> = &mut self.layers[path[0]];
         for &i in &path[1..] {
             cur = &mut Arc::make_mut(cur).children_mut()?[i];
@@ -471,7 +476,10 @@ impl Document {
     /// Children list of a container (or the top-level layer list for `None`).
     pub fn children_mut(&mut self, parent: Option<NodeId>) -> Result<&mut Vec<Arc<Node>>, DocError> {
         match parent {
-            None => Ok(&mut self.layers),
+            None => {
+                self.hit_index.bump();
+                Ok(&mut self.layers)
+            }
             Some(p) => self.node_mut(p).ok_or(DocError::NoNode(p))?.children_mut().ok_or(DocError::NotContainer(p)),
         }
     }
@@ -643,7 +651,10 @@ impl Document {
     /// The children of the node at index path `path`, or the top-level layers for an empty path.
     fn children_at(&mut self, path: &[usize]) -> Option<&mut Vec<Arc<Node>>> {
         match path {
-            [] => Some(&mut self.layers),
+            [] => {
+                self.hit_index.bump();
+                Some(&mut self.layers)
+            }
             _ => self.node_mut_at(path)?.children_mut(),
         }
     }
@@ -655,6 +666,7 @@ impl Document {
 
     /// Add a new top-level layer above all others.
     pub fn add_layer(&mut self, name: Option<&str>) -> NodeId {
+        self.hit_index.bump();
         let id = self.alloc_id();
         let n = self.layers.len();
         let name = name.map(str::to_string).unwrap_or_else(|| self.next_layer_name());
