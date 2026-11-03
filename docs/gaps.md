@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-31 · **Change:** minor (G5: dynamic symbols, #4938; estimate 15–26 → 14–24 h) · **Target:** Adobe Illustrator 2026 (30.x; G12: Units › East Asian Type acts, with Q and Ha units; estimate unchanged) · **Target:** Adobe Illustrator 2026 (30.x)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-03 · **Change:** patch (Variance-exact Gaussian via craft-blur (artcraft-algorithms #2); transparent edges and premultiplied alpha retained; scores and hours unchanged) · **Target:** Adobe Illustrator 2026 (30.x; G12: Units › East Asian Type acts, with Q and Ha units; estimate unchanged) · **Target:** Adobe Illustrator 2026 (30.x)
 
 ## Feature submission evidence
 
@@ -433,6 +433,8 @@ from G14 and the budget run of G15: **~170–270 h** one agent, ~50–80 h wall 
 
 ## G2 Photoshop-style raster effects and the Effect Gallery
 
+- **Done (2026-11-03):** Gaussian variance calibrated through `craft-blur`, with zero/transparent edges and premultiplied alpha retained; [numerical and golden evidence](gaussian-blur-migration.md). This does not close the remaining Effect Gallery UI gap or change its estimate.
+
 - **Done:** Effect › Texture › Texturizer › Load Texture… (stored grayscale `textureImage`, Loaded Texture in the Texture menu), matching Glass.
 - **Missing:** the Effect Gallery's filter thumbnails and a preview area inside the dialog ([Filter Gallery overview](https://helpx.adobe.com/photoshop/desktop/effects-filters/get-started-with-filters/filter-gallery.html)); all 57 Photoshop-style filters are in the catalogue. Measured in
   [effects-parity.md](effects-parity.md).
@@ -703,6 +705,7 @@ trap, and the defaults (0.25 pt, 100%, 40%) are VectorCraft's own, the pages giv
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-03 | patch | Variance-exact Gaussian via craft-blur (artcraft-algorithms #2); transparent edges and premultiplied alpha retained; scores and hours unchanged; [measurements, pixel deltas and reproduction](gaussian-blur-migration.md). |
 | 2026-10-31 | minor | G12: Units › East Asian Type acts (#394): Q and Ha (a quarter of a millimetre each) are units that preference offers; 4 Preferences options remain stored but not acted on. Estimate unchanged. |
 | 2026-11-01 | minor | G5: dynamic symbols (#4938): Symbol Options › Symbol Type, per-instance fill, stroke, opacity and blend for objects of a dynamic symbol's art that stay linked (redefining keeps them, Break Link bakes them, Reset and Static drop them; `symbol.instance.setAppearance`, `symbol.instance.reset`; `crates/engine/src/tests/dynamic_symbols.rs`); on-canvas Direct Selection of the parts and `.ai` round trip remain. Estimate 15–26 → 14–24 h. |
 | 2026-11-01 | minor | G13: Artboard background colors in output (#4937): raster exports (a transparent background too), PDF, SVG and EPS pages, `.ai` files' PDF pages, Export for Screens and print (and its preview) draw each artboard's color behind its art, inside the artboard and in the color's own model; Export for Screens has Include Artboard Fill beside Include Bleed (on by default, remembered; `includeArtboardFill`, also on `document.export` and `file.print`); editing data keeps the color as the artboard's, and Export for Screens' document rows keep it too; estimate unchanged. |

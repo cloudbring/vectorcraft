@@ -673,8 +673,7 @@ fn smart_blur_normal_mode_keeps_its_pixels() {
         assert_eq!(d, normal);
         sums.push(digest(&d));
     }
-    // The pixels Smart Blur gave before it had a mode.
-    assert_eq!(sums, [11495339692959753241, 14281410954765351056, 5111933201350526354]);
+    assert_eq!(sums, [11495339692959753241, 14281410954765351056, 3831106864807608817]);
 }
 
 /// Smart Blur's test image: grays 56 and 64 in a checkerboard for x < 3 and 66 and 74 for x in 3..6

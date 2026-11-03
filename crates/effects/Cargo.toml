@@ -9,6 +9,9 @@ description = "VectorCraft live effects evaluated to geometry"
 workspace = true
 
 [dependencies]
+# TODO(#2): repoint to a pinned craft-libs main revision after the blur branch lands.
+craft-blur = { git = "https://github.com/cloudbring/craft-libs", branch = "algo/2-craft-blur-midband" }
+log = { workspace = true }
 vectorcraft-geom = { workspace = true }
 vectorcraft-three-d = { workspace = true }
 vectorcraft-doc = { workspace = true }

@@ -1,6 +1,6 @@
 # Effects parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-28 · **Change:** minor (Effect dialogs clamp bounded length inputs immediately on commit and flash rejection on invalid input (#4638); previously: Drop Shadow Darkness uses fixed RGB subtraction and CMYK black addition; scores unchanged; Pathfinder › Trap: the Pathfinder panel's Trap… and Effect › Pathfinder › Trap… add an overprinting strip of the lighter colour where two solid colours meet; recounted with Hard Mix (#3061) and Soft Mix already in the catalogue: Pathfinder 13/13, Illustrator effects 49/50) · **Target:** Adobe Illustrator 2026 (30.x)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-03 · **Change:** patch (Variance-exact Gaussian via craft-blur (artcraft-algorithms #2); transparent edges and premultiplied alpha retained; scores and hours unchanged) · **Target:** Adobe Illustrator 2026 (30.x)
 
 Every entry of Illustrator's Effect menu, by its public feature name, against VectorCraft's effects catalogue
 (`effect_catalog()` in `crates/effects/src/lib.rs`) and the Effect menu built from it
@@ -33,6 +33,10 @@ Part of [target-app-parity.md](target-app-parity.md); open work is in [gaps.md](
 Document Raster Effects Settings exists. When the 64 million pixel cap on an effect image lowers
 its resolution, PDF export warns once per object with the requested and the lowest achieved ppi
 (`crates/engine/src/tests/pdfraster.rs`).
+
+## Gaussian accuracy
+
+The Gaussian helpers (including the CPU drop-shadow, outer-glow and feather paths) and Smart Blur's box prefilter use `craft-blur`. Impulse variance is regression-tested within 0.5% at σ = 1, 4 and 16; [migration evidence](gaussian-blur-migration.md) records appearance changes and timings. This is numerical correctness evidence, not a new visual-parity score.
 
 ## Photoshop effects
 
@@ -193,6 +197,7 @@ angular cut caps, exact visibility, 3D Classic, Turntable, 3D export) is 25–45
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-03 | patch | Variance-exact Gaussian via craft-blur (artcraft-algorithms #2); transparent edges and premultiplied alpha retained; scores and hours unchanged; [measurements, pixel deltas and reproduction](gaussian-blur-migration.md). |
 | 2026-10-30 | minor | Effect dialogs: bounded length fields (Color Halftone Max Radius) clamp on commit and visibly reject invalid input (#4638); scores unchanged. |
 | 2026-10-23 | minor | Pathfinder › Trap ([trapping](https://helpx.adobe.com/illustrator/using/trapping.html)): the Pathfinder panel's Trap… (`object.pathfinder.trap`, one undo step, the traps grouped above the topmost selected object and selected) and Effect › Pathfinder › Trap… (`pathfinder.trap`, live on groups) add an overprinting strip of the lighter colour inside the darker one where two solid colours meet (Reverse Traps: the darker into the lighter, but not a rich black), with Thickness, Height/Width, Tint Reduction and Traps with Process Color; the effect also has Precision and Remove Redundant Points. Recounted: Hard Mix (#3061) and Soft Mix had shipped, so Pathfinder 11/13 → 13/13 and Illustrator effects 46/50 → 49/50 (SVG Filters remains); remaining 6–10 → 4–8 h. Tests: `vectorcraft_pathops` `trap::tests`, `vectorcraft_effects` `trap::tests` and `group::tests::trap_effect_adds_an_overprinting_strip_above_the_members`, `vectorcraft_engine` `tests_trap`, `panels::pathfinder::tests::trap_opens_its_options_and_ok_traps_the_selection`. |
 | 2026-10-22 | minor | The Transform effect has Transform Objects, Transform Patterns and Scale Strokes & Effects, with visible checkboxes (#885); on a fill's or stroke's own Transform effect the last two are still missing. Counts unchanged. |
