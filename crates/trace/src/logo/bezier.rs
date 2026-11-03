@@ -1,123 +1,22 @@
-//! Least-squares cubic Bézier fitting (Schneider's algorithm): fit one cubic to a run of points,
-//! improve its parametrisation, and split where the error is largest until every piece is within
-//! the tolerance. After P. J. Schneider, "An algorithm for automatically fitting digitized curves"
-//! (Graphics Gems, 1990), written from the description there.
+//! Least-squares cubic Bézier fitting (Schneider's algorithm). The fitter lives in
+//! [`vectorcraft_geom::fit`]. Image Trace passes the end tangent at the start pointing forward and
+//! the end tangent at the finish pointing back along the run; the shared fitter takes both
+//! pointing forward.
 
-use super::geom::{Cubic, bez};
+use super::geom::Cubic;
 use kurbo::Vec2;
 use vectorcraft_geom::Point;
-
-const MAX_DEPTH: usize = 14;
-
-fn chord(p: &[Point]) -> Vec<f64> {
-    let mut d = vec![0.0];
-    for w in p.windows(2) {
-        d.push(d.last().copied().unwrap_or(0.0) + w[0].distance(w[1]));
-    }
-    let total = d.last().copied().unwrap_or(0.0);
-    if total > 0.0 {
-        d.iter_mut().for_each(|v| *v /= total);
-    }
-    d
-}
-
-fn fit_one(p: &[Point], u: &[f64], t1: Vec2, t2: Vec2) -> Option<Cubic> {
-    let (p0, p3) = (*p.first()?, *p.last()?);
-    let (mut c00, mut c01, mut c11, mut x0, mut x1) = (0.0, 0.0, 0.0, 0.0, 0.0);
-    for (q, &t) in p.iter().zip(u) {
-        let s = 1.0 - t;
-        let (b0, b1, b2, b3) = (s * s * s, 3.0 * t * s * s, 3.0 * t * t * s, t * t * t);
-        let (a1, a2) = (t1 * b1, t2 * b2);
-        c00 += a1.dot(a1);
-        c01 += a1.dot(a2);
-        c11 += a2.dot(a2);
-        let tmp = *q - (p0.to_vec2() * (b0 + b1) + p3.to_vec2() * (b2 + b3)).to_point();
-        x0 += a1.dot(tmp);
-        x1 += a2.dot(tmp);
-    }
-    let det = c00 * c11 - c01 * c01;
-    let seg = p0.distance(p3);
-    let (mut al, mut ar) = if det.abs() > 1e-12 { ((x0 * c11 - x1 * c01) / det, (c00 * x1 - c01 * x0) / det) } else { (0.0, 0.0) };
-    if !al.is_finite() || !ar.is_finite() || al <= 1e-6 * seg || ar <= 1e-6 * seg {
-        al = seg / 3.0;
-        ar = seg / 3.0;
-    }
-    Some([p0, p0 + t1 * al, p3 + t2 * ar, p3])
-}
-
-fn reparam(c: &Cubic, p: &[Point], u: &[f64]) -> Vec<f64> {
-    p.iter()
-        .zip(u)
-        .map(|(q, &t)| {
-            let s = 1.0 - t;
-            let d = bez(c, t) - *q;
-            let (v0, v1, v2) = (c[1] - c[0], c[2] - c[1], c[3] - c[2]);
-            let d1 = (v0 * (s * s) + v1 * (2.0 * s * t) + v2 * (t * t)) * 3.0;
-            let d2 = ((v1 - v0) * s + (v2 - v1) * t) * 6.0;
-            let den = d1.dot(d1) + d.dot(d2);
-            if den.abs() > 1e-12 { (t - d.dot(d1) / den).clamp(0.0, 1.0) } else { t }
-        })
-        .collect()
-}
-
-fn max_err(c: &Cubic, p: &[Point], u: &[f64]) -> (f64, usize) {
-    let mut best = (0.0, p.len() / 2);
-    for (i, (q, &t)) in p.iter().zip(u).enumerate() {
-        let e = bez(c, t).distance(*q);
-        if e > best.0 {
-            best = (e, i);
-        }
-    }
-    best
-}
-
-fn rec(p: &[Point], t1: Vec2, t2: Vec2, tol: f64, depth: usize, out: &mut Vec<Cubic>) {
-    let (Some(&a), Some(&b)) = (p.first(), p.last()) else { return };
-    if p.len() == 2 {
-        let d = a.distance(b) / 3.0;
-        out.push([a, a + t1 * d, b + t2 * d, b]);
-        return;
-    }
-    let mut u = chord(p);
-    let Some(mut c) = fit_one(p, &u, t1, t2) else { return };
-    for _ in 0..4 {
-        let (e, _) = max_err(&c, p, &u);
-        if e < tol {
-            out.push(c);
-            return;
-        }
-        if e > tol * 6.0 {
-            break;
-        }
-        u = reparam(&c, p, &u);
-        match fit_one(p, &u, t1, t2) {
-            Some(n) => c = n,
-            None => break,
-        }
-    }
-    let (e, split) = max_err(&c, p, &u);
-    if e < tol || depth >= MAX_DEPTH || p.len() < 6 {
-        out.push(c);
-        return;
-    }
-    let s = split.clamp(2, p.len() - 3);
-    let tc = match (p.get(s - 1), p.get(s + 1)) {
-        (Some(&x), Some(&y)) if x.distance(y) > 1e-12 => (x - y) / x.distance(y),
-        _ => t1,
-    };
-    rec(p.get(..=s).unwrap_or(p), t1, tc, tol, depth + 1, out);
-    rec(p.get(s..).unwrap_or(p), -tc, t2, tol, depth + 1, out);
-}
+use vectorcraft_geom::fit::{EndTangents, FitOptions};
 
 /// Cubics through `p` (first and last points are interpolated) with end tangents `t1` (pointing
 /// along the run at its start) and `t2` (pointing back along the run at its end), each within
 /// `tol` of the points.
 pub(crate) fn fit_cubics(p: &[Point], t1: Vec2, t2: Vec2, tol: f64) -> Vec<Cubic> {
-    let mut out = Vec::new();
-    if p.len() >= 2 && tol > 0.0 && p.iter().all(|q| q.x.is_finite() && q.y.is_finite()) {
-        rec(p, t1, t2, tol, 0, &mut out);
-    }
-    out
+    // `-t2` is the forward arrival. The solver negates it again, which restores `t2`.
+    vectorcraft_geom::fit::fit_cubics(p, EndTangents { start: t1, end: -t2 }, &FitOptions::trace(tol))
+        .into_iter()
+        .map(|c| [c.p0, c.p1, c.p2, c.p3])
+        .collect()
 }
 
 /// Unit direction from `p[i]` towards `p[i + k]` (`sign > 0`) or `p[i - k]` (`sign < 0`).
@@ -133,6 +32,43 @@ pub(crate) fn tangent(p: &[Point], i: usize, k: usize, sign: i32) -> Vec2 {
 mod tests {
     use super::*;
     use crate::logo::geom::sample_cubics;
+
+    fn fnv_curves(curves: &[Cubic]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for c in curves {
+            for p in c {
+                for bits in [p.x.to_bits(), p.y.to_bits()] {
+                    h ^= bits;
+                    h = h.wrapping_mul(0x100_0000_01b3);
+                }
+            }
+        }
+        h
+    }
+
+    /// Control points the Image Trace fitter produced on these fixtures before the move.
+    #[test]
+    fn output_matches_the_fitter_it_replaced() {
+        let arc: Vec<Point> = (0..200).map(|i| Point::new(20.0 * (i as f64 * 0.006).cos(), 20.0 * (i as f64 * 0.006).sin())).collect();
+        let mut hashes = vec![fnv_curves(&fit_cubics(&arc, tangent(&arc, 0, 4, 1), tangent(&arc, 199, 4, -1), 0.05))];
+        let n = 1200;
+        let mut circle: Vec<Point> = (0..=n)
+            .map(|i| {
+                Point::new(
+                    50.0 + 20.0 * (i as f64 / n as f64 * std::f64::consts::TAU).cos(),
+                    50.0 + 20.0 * (i as f64 / n as f64 * std::f64::consts::TAU).sin(),
+                )
+            })
+            .collect();
+        circle[n] = circle[0];
+        let t = (circle[1] - circle[n - 1]) / circle[1].distance(circle[n - 1]);
+        hashes.push(fnv_curves(&fit_cubics(&circle, t, -t, 0.05)));
+        let wave: Vec<Point> = (0..600).map(|i| Point::new(i as f64 * 0.05, 3.0 * (i as f64 * 0.02).sin())).collect();
+        hashes.push(fnv_curves(&fit_cubics(&wave, tangent(&wave, 0, 4, 1), tangent(&wave, 599, 4, -1), 0.04)));
+        let join: Vec<Point> = (0..400).map(|i| Point::new(i as f64 * 0.1, (i as f64 * 0.05).sin() * 4.0)).collect();
+        hashes.push(fnv_curves(&fit_cubics(&join, tangent(&join, 0, 4, 1), tangent(&join, 399, 4, -1), 0.02)));
+        assert_eq!(hashes, [6_737_439_215_139_984_406, 15_137_840_694_227_842_059, 16_432_155_519_750_773_581, 6_603_620_059_492_543_387]);
+    }
 
     fn dev(cs: &[Cubic], pts: &[Point]) -> f64 {
         let s = sample_cubics(cs, 0.01);
