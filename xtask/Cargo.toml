@@ -10,3 +10,7 @@ workspace = true
 
 [dependencies]
 serde_json = { workspace = true }
+# TODO: repoint to storytold/craft-libs after upstream merge
+craft-xtask = { git = "https://github.com/cloudbring/craft-libs", branch = "algo/integration" }
+# TODO: repoint to storytold/craft-libs after upstream merge
+craft-hash = { git = "https://github.com/cloudbring/craft-libs", branch = "algo/integration" }

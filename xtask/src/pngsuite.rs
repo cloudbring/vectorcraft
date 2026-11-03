@@ -5,7 +5,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{root, run, sha256};
+use crate::{root, run};
+use craft_hash::sha256_hex;
 
 const SOURCE: &str = "https://raw.githubusercontent.com/lunapaint/pngsuite/8cd768dd0d0063195174d0d01cacbd5a7d1e5605";
 const MANIFEST: &str = include_str!("../pngsuite.sha256");
@@ -61,7 +62,7 @@ fn verified(path: &Path, entry: &Entry<'_>) -> Result<bool, String> {
     }
     let mut data = Vec::new();
     File::open(path).and_then(|f| f.take(entry.bytes + 1).read_to_end(&mut data)).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(data.len() as u64 == entry.bytes && sha256::hex(&data) == entry.sha)
+    Ok(data.len() as u64 == entry.bytes && sha256_hex(&data) == entry.sha)
 }
 
 struct Download(PathBuf);
@@ -162,7 +163,7 @@ mod tests {
         }
     }
     fn manifest(data: &[u8]) -> String {
-        format!("{} {} test.png\n", sha256::hex(data), data.len())
+        format!("{} {} test.png\n", sha256_hex(data), data.len())
     }
 
     #[test]
@@ -241,7 +242,7 @@ mod tests {
 
     #[test]
     fn manifest_rejects_unexpected_names_duplicates_and_resource_budgets() {
-        let sha = sha256::hex(b"png");
+        let sha = sha256_hex(b"png");
         for name in ["../test.png", "a/b.png", "a\\b.png", "a:stream.png", "script.exe", "a..png"] {
             assert!(entries(&format!("{sha} 3 {name}\n")).is_err());
         }

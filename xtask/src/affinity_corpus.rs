@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::{root, run, sha256};
+use crate::{root, run};
 
 /// (repository, commit, licence, [(path in the repository, file name in corpus/affinity)]).
 type Source = (&'static str, &'static str, &'static str, &'static [(&'static str, &'static str)]);
@@ -147,5 +147,5 @@ pub fn fetch() -> Result<(), String> {
 }
 
 fn verified(path: &Path, sha: &str) -> bool {
-    std::fs::read(path).is_ok_and(|b| sha256::hex(&b) == sha)
+    craft_xtask::sha256_hex(path).is_ok_and(|digest| digest == sha)
 }

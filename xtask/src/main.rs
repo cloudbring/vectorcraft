@@ -1,22 +1,18 @@
 //! Workspace tooling: `cargo xtask <command>`.
 //!
-//! Pure Rust (std + serde_json). External tools (`cargo`, `curl`, `tar`) are
+//! Pure Rust (craft-xtask + craft-hash + serde_json). External tools (`cargo`, `curl`, `tar`) are
 //! invoked through `std::process::Command`.
 
 mod affinity_corpus;
 mod assets;
 mod brands;
 mod bundle;
+mod config;
 mod cursors;
-mod ico;
-mod layers;
-mod pdf_deps;
 mod pngsuite;
-mod sha256;
-mod stats;
-mod version;
 mod web_fonts;
 
+use craft_xtask::{ico, layers, stats, version};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -54,19 +50,23 @@ fn main() -> ExitCode {
         Some("cursors") => cursors::run(&root()),
         Some("i18n-report") => cmd_i18n_report(),
         Some("layers") => cmd_layers(),
-        Some("pdf-deps") => pdf_deps::run(&root()),
+        Some("pdf-deps") => config::run_pdf_deps(&config::pdf_deps(&root())),
         Some("wasm") => cmd_wasm(),
         Some("test") => cmd_test().and_then(|()| cmd_doctests()),
         Some("ci") => cmd_ci(),
         Some("corpus") if rest.contains(&"--affinity") => affinity_corpus::fetch(),
         Some("corpus") => cmd_corpus(rest.contains(&"--download")),
         Some("bundle") => bundle::run(&root()),
-        Some("ico") => ico::run(&rest),
-        Some("version") => version::run(&root(), &rest),
-        Some("stats") => stats::run(&root(), rest.contains(&"--exact")),
+        Some("ico") => config::run_ico(&ico::Config::default(), &args[1..]),
+        Some("version") => version::run(&config::version(&root()), &args[1..]),
+        Some("stats") => stats::run(&config::stats(&root()), &args[1..]),
         Some("web-fonts") => web_fonts::run(&root()),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");
+            println!("\nShared task syntax:");
+            for help in [version::cli_help(), stats::cli_help(), ico::cli_help()] {
+                println!("  {help}");
+            }
             Ok(())
         }
         Some(other) => Err(format!("unknown command `{other}`\n\n{USAGE}")),
@@ -160,52 +160,17 @@ pub fn metadata() -> Result<serde_json::Value, String> {
 }
 
 fn cmd_layers() -> Result<(), String> {
-    let crates = layers::from_metadata(&metadata()?)?;
-    println!("Dependency layering (plan/architecture.md §3)\n");
-    println!("{:<28} {:<14} workspace deps", "crate", "layer");
-    for c in &crates {
-        let ws: Vec<String> = c
-            .deps
-            .iter()
-            .filter(|d| d.workspace)
-            .map(|d| {
-                let k = match d.kind {
-                    layers::DepKind::Normal => "",
-                    layers::DepKind::Dev => " (dev)",
-                    layers::DepKind::Build => " (build)",
-                };
-                format!("{}{k}", layers::short_name(&d.name))
-            })
-            .collect();
-        println!("{:<28} {:<14} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
-    }
-    let violations = layers::check(&crates);
-    println!();
-    if violations.is_empty() {
-        println!("OK: {} crates, no layering violations.", crates.len());
-        Ok(())
-    } else {
-        println!("{} violation(s):", violations.len());
-        for v in &violations {
-            println!("  - {v}");
-        }
-        Err(format!("{} layering violation(s)", violations.len()))
-    }
+    let (report, result) = config::layer_report(&config::layers(&root()), &metadata()?)?;
+    print!("{report}");
+    result
 }
 
 /// Workspace packages that must build for wasm32: all L0–L5 crates, the egui
 /// shell, and the web app (its wasm-only code is compiled by nothing else).
 fn wasm_set() -> Result<Vec<String>, String> {
     let crates = layers::from_metadata(&metadata()?)?;
-    Ok(crates
-        .into_iter()
-        .filter(|c| match layers::classify(&c.name) {
-            Some(layers::Class::Layer(l)) => l <= 5 || layers::short_name(&c.name) == "ui-egui",
-            Some(layers::Class::Standalone) => true,
-            _ => layers::short_name(&c.name) == "web",
-        })
-        .map(|c| c.name)
-        .collect())
+    let policy = config::layers(&root());
+    Ok(crates.into_iter().filter(|krate| config::wasm_safe(&policy, &krate.name)).map(|krate| krate.name).collect())
 }
 
 /// One `cargo check` over the whole wasm set: the crates share one build, and `--keep-going`
@@ -290,7 +255,7 @@ fn cmd_ci() -> Result<(), String> {
                 run(c, "cargo test -p vectorcraft-ui-egui --no-default-features --test install_fonts")
             }),
         ),
-        ("pdf-deps", Box::new(|| pdf_deps::run(&root()))),
+        ("pdf-deps", Box::new(|| config::run_pdf_deps(&config::pdf_deps(&root())))),
         ("assets", Box::new(|| assets::run(&root()))),
         ("brands", Box::new(|| brands::run(&root()))),
         ("cursors", Box::new(|| cursors::run(&root()))),

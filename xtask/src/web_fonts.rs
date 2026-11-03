@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::sha256;
+use craft_hash::sha256_hex;
 
 #[allow(dead_code)] // build.rs uses the rest (sri, base64)
 #[path = "../../crates/text/build/web_fonts.rs"]
@@ -52,7 +52,7 @@ fn copy(list_path: &Path, dir: &Path, site: &Path) -> Result<(usize, Vec<String>
             return Err(format!("malformed manifest row for {} {}", e.family, e.style));
         };
         let bytes = std::fs::read(dir.join(file)).map_err(|err| format!("{file}: {err}"))?;
-        let got = sha256::hex(&bytes);
+        let got = sha256_hex(&bytes);
         if got != *sha {
             return Err(format!("{file}: sha256 {got}, manifest says {sha}"));
         }
@@ -85,7 +85,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("fonts/a")).unwrap();
         std::fs::write(dir.join("fonts/a/A-Regular.ttf"), b"font bytes").unwrap();
         std::fs::write(dir.join("fonts/a/OFL.txt"), b"licence").unwrap();
-        let sha = sha256::hex(b"font bytes");
+        let sha = sha256_hex(b"font bytes");
         let row_sha = manifest_sha.map_or(sha.clone(), str::to_string);
         std::fs::write(
             dir.join("fonts/manifest.txt"),

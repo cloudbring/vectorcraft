@@ -1,0 +1,33 @@
+Dependency layering (plan/architecture.md §3)
+
+crate                        layer          workspace deps
+vectorcraft                  exempt         engine, text, ui-egui, render
+vectorcraft-affinity         L0 standalone  
+vectorcraft-brush            L2             color, doc, geom
+vectorcraft-cad              L3             brush, color, doc, effects, geom, pathops, text, text (dev)
+vectorcraft-cli              exempt         color, doc, engine, format, geom, mcp, render, svg, text, testkit (dev)
+vectorcraft-color            L0             
+vectorcraft-doc              L1             color, geom
+vectorcraft-effects          L2             doc, geom, pathops, plugins, text, three-d, color (dev)
+vectorcraft-engine           L5             affinity, brush, cad, color, doc, eps, format, geom, metafile, pathops, pdf, plugins, render, scriptcheck, svg, text, tools, trace, affinity (dev), testkit (dev), text (dev)
+vectorcraft-eps              L3             brush, color, doc, effects, geom, metafile, pdf, render, text, testkit (dev), text (dev)
+vectorcraft-format           L3             doc, geom (dev), testkit (dev)
+vectorcraft-geom             L0             testkit (dev)
+vectorcraft-mcp              L6             doc, engine, format, geom, render, svg, tools, testkit (dev)
+vectorcraft-metafile         L3             brush, color, doc, effects, geom, text, text (dev)
+vectorcraft-pathops          L2             geom, testkit (dev)
+vectorcraft-pdf              L3             brush, color, doc, effects, geom, text, testkit (dev), text (dev)
+vectorcraft-plugins          L2             color, doc, geom
+vectorcraft-render           L3             brush, color, doc, effects, geom, text, plugins (dev), testkit (dev), text (dev)
+vectorcraft-scriptcheck      L0 standalone  
+vectorcraft-svg              L3             brush, color, doc, effects, geom, text, testkit (dev), text (dev)
+vectorcraft-testkit          testkit        color, doc, engine, format, geom, render, svg
+vectorcraft-text             L2             doc, geom
+vectorcraft-three-d          L2             geom, pathops
+vectorcraft-tools            L4             brush, color, doc, effects, geom, pathops, text, text (dev)
+vectorcraft-trace            L2             geom
+vectorcraft-ui-egui          L6             brush, cad, color, doc, effects, engine, eps, format, geom, pdf, plugins, render, svg, text, three-d, tools, testkit (dev), text (dev)
+vectorcraft-web              exempt         engine, format, text, ui-egui
+xtask                        exempt         
+
+OK: 28 crates, no layering violations.
