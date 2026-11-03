@@ -243,6 +243,33 @@ fn polyline_bulges_are_exact_arcs() {
 }
 
 #[test]
+fn flatten_curves_option_produces_line_segments() {
+    use kurbo::ParamCurveNearest;
+    let input = entities(&[(0, "CIRCLE"), (10, "0"), (20, "0"), (40, "10")]);
+    let curved = open(&input, &points()).document;
+    let flat = open(&input, &ImportOptions { flatten_curves: true, ..points() }).document;
+    let curved_paths = leaves(&curved);
+    let flat_paths = leaves(&flat);
+    let curved_path = curved_paths[0].path_data().unwrap().to_bezpath();
+    let flat_path = flat_paths[0].path_data().unwrap().to_bezpath();
+    assert!(curved_path.elements().iter().any(|element| matches!(element, kurbo::PathEl::CurveTo(..))));
+    assert!(!flat_path.elements().iter().any(|element| matches!(element, kurbo::PathEl::CurveTo(..) | kurbo::PathEl::QuadTo(..))));
+    assert!(flat_path.elements().len() > curved_path.elements().len());
+    let flat_segments: Vec<_> = flat_path.segments().collect();
+    let mut worst: f64 = 0.0;
+    for segment in curved_path.segments() {
+        for index in 0..=1000 {
+            let point = segment.eval(f64::from(index) / 1000.0);
+            let distance = flat_segments.iter().map(|line| line.nearest(point, 1e-10).distance_sq).fold(f64::INFINITY, f64::min).sqrt();
+            worst = worst.max(distance);
+        }
+    }
+    let anchors = |node: &Node| node.path_data().unwrap().subpaths.iter().map(|subpath| subpath.anchors.len()).sum::<usize>();
+    println!("circle fixture: flattened={} curved={} max deviation={worst:.9}", anchors(&flat_paths[0]), anchors(&curved_paths[0]));
+    assert!(worst < 0.01);
+}
+
+#[test]
 fn nurbs_splines_stay_within_a_hundredth() {
     // A rational quadratic circle of radius 100: nine weighted control points.
     let w = std::f64::consts::FRAC_1_SQRT_2.to_string();

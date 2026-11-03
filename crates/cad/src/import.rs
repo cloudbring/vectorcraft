@@ -54,11 +54,23 @@ pub struct ImportOptions {
     pub center: bool,
     /// All art on one layer.
     pub merge_layers: bool,
+    /// Replace imported curves with line segments, within 0.005 drawing units.
+    pub flatten_curves: bool,
 }
 
 impl Default for ImportOptions {
     fn default() -> Self {
-        Self { layout: None, fit: false, fit_to: FIT_TO, unit: None, scale: None, scale_lineweights: false, center: true, merge_layers: false }
+        Self {
+            layout: None,
+            fit: false,
+            fit_to: FIT_TO,
+            unit: None,
+            scale: None,
+            scale_lineweights: false,
+            center: true,
+            merge_layers: false,
+            flatten_curves: false,
+        }
     }
 }
 

@@ -47,22 +47,27 @@ pub(crate) fn polyline(verts: &[Vertex], closed: bool) -> Option<BezPath> {
 
 /// A segment from `a` (the current point) to `b`, an arc when `bulge` isn't 0.
 fn bulge_to(bp: &mut BezPath, a: Point, b: Point, bulge: f64) {
+    let Some((centre, radius, start, sweep)) = bulge_arc(a, b, bulge) else {
+        bp.line_to(b);
+        return;
+    };
+    arc_to(bp, centre, radius, start, sweep);
+}
+
+fn bulge_arc(a: Point, b: Point, bulge: f64) -> Option<(Point, f64, f64, f64)> {
     let chord = b - a;
     let len = chord.hypot();
     if bulge.abs() < 1e-12 || len < 1e-12 || !bulge.is_finite() {
-        bp.line_to(b);
-        return;
+        return None;
     }
     // The included angle is 4·atan(bulge); the centre lies off the chord's middle.
     let sweep = 4.0 * bulge.atan();
     let radius = len / (2.0 * (sweep / 2.0).sin()).abs();
     let normal = Vec2::new(-chord.y, chord.x) / len;
-    let offset = (radius * radius - len * len / 4.0).max(0.0).sqrt();
-    // A counter-clockwise arc under a half turn has its centre left of the chord.
-    let side = if (bulge > 0.0) == (bulge.abs() < 1.0) { 1.0 } else { -1.0 };
-    let centre = a.midpoint(b) + normal * offset * side;
+    let offset = (len / 4.0) * (bulge.recip() - bulge);
+    let centre = a.midpoint(b) + normal * offset;
     let start = (a - centre).atan2();
-    arc_to(bp, centre, radius, start, sweep);
+    (radius.is_finite() && centre.x.is_finite() && centre.y.is_finite()).then_some((centre, radius, start, sweep))
 }
 
 /// An arc of a circle from angle `start` (radians) through `sweep` (positive: counter-clockwise),
@@ -306,6 +311,67 @@ mod tests {
             }
         }
         worst
+    }
+
+    #[test]
+    fn clamped_cubic_spline_matches_de_boor_at_a_thousand_parameters() {
+        let knots = [0., 0., 0., 0., 0.3, 0.7, 1., 1., 1., 1.];
+        let ctrl = [(0., 0.), (2., 4.), (5., -2.), (8., 5.), (11., 2.), (14., 1.)].map(|(x, y)| Point::new(x, y));
+        let path = nurbs(3, &knots, &ctrl, None).unwrap();
+        let segments: Vec<_> = path.segments().collect();
+        assert_eq!(segments.len(), 3);
+        let mut worst: f64 = 0.0;
+        for index in 0..1000 {
+            let t = f64::from(index) / 999.0;
+            let span = if t < 0.3 {
+                3
+            } else if t < 0.7 {
+                4
+            } else {
+                5
+            };
+            let mut work = [ctrl[span - 3], ctrl[span - 2], ctrl[span - 1], ctrl[span]];
+            for level in 1..=3 {
+                for index in (level..=3).rev() {
+                    let knot = span - 3 + index;
+                    let alpha = (t - knots[knot]) / (knots[knot + 4 - level] - knots[knot]);
+                    work[index] = work[index - 1].lerp(work[index], alpha);
+                }
+            }
+            let expected = work[3];
+            let actual = kurbo::ParamCurve::eval(&segments[span - 3], (t - knots[span]) / (knots[span + 1] - knots[span]));
+            worst = worst.max(actual.distance(expected));
+        }
+        assert!(worst < 1e-6, "maximum spline deviation {worst}");
+    }
+
+    #[test]
+    fn known_arc_round_trips_through_bulge() {
+        let centre = Point::new(12.0, -5.0);
+        let radius = 7.0;
+        for sweep in [-4.5_f64, -1.2, 1.2, 4.5] {
+            let start = 0.4;
+            let a = centre + Vec2::from_angle(start) * radius;
+            let b = centre + Vec2::from_angle(start + sweep) * radius;
+            let (actual_centre, actual_radius, actual_start, actual_sweep) = bulge_arc(a, b, (sweep / 4.0).tan()).unwrap();
+            assert!(actual_centre.distance(centre) < 1e-9);
+            assert!((actual_radius - radius).abs() < 1e-9);
+            assert!((actual_start - start).abs() < 1e-9);
+            assert!((actual_sweep - sweep).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn ellipse_cubics_follow_the_affine_circle() {
+        let frame = Affine::new([7.0, 2.0, -1.0, 3.0, 10.0, -4.0]);
+        let path = ellipse(frame, 0.0, std::f64::consts::TAU).unwrap();
+        let inverse = frame.inverse();
+        for segment in path.segments() {
+            for index in 0..=100 {
+                let point = inverse * kurbo::ParamCurve::eval(&segment, f64::from(index) / 100.0);
+                assert!((point.distance(Point::ZERO) - 1.0).abs() < 1e-5);
+            }
+        }
     }
 
     #[test]

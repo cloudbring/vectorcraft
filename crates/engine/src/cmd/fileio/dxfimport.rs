@@ -34,6 +34,7 @@ struct Params {
     scale_lineweights: Option<bool>,
     center: Option<bool>,
     merge_layers: Option<bool>,
+    flatten_curves: Option<bool>,
 }
 
 /// The DXF import options in `p` (the `dxf` object of `document.open` and `file.place`).
@@ -67,6 +68,7 @@ pub(super) fn options(cmd: &str, p: Option<&Value>) -> Result<ImportOptions> {
         scale_lineweights: q.scale_lineweights.unwrap_or(d.scale_lineweights),
         center: q.center.unwrap_or(d.center),
         merge_layers: q.merge_layers.unwrap_or(d.merge_layers),
+        flatten_curves: q.flatten_curves.unwrap_or(d.flatten_curves),
     })
 }
 

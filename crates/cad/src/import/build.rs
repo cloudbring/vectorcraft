@@ -458,6 +458,17 @@ impl<'d, 'a> Build<'d, 'a> {
     }
 
     fn path(&mut self, bp: &BezPath, fill: bool, width: f64, p: &Props, map: Affine, inh: &Inherit) -> Option<Node> {
+        let mut flat = BezPath::new();
+        let bp = if self.o.flatten_curves {
+            kurbo::flatten(bp.iter(), 0.005, |element| {
+                if flat.elements().len() <= MAX_ELEMENTS {
+                    flat.push(element);
+                }
+            });
+            &flat
+        } else {
+            bp
+        };
         let n = bp.elements().len();
         if self.elements.saturating_add(n) > MAX_ELEMENTS {
             self.warn(TOO_MANY_POINTS);
