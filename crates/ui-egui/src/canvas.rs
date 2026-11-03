@@ -97,18 +97,14 @@ impl Xf {
     pub fn new(rect: egui::Rect, v: &View) -> Self {
         Self { rect, zoom: v.zoom, center: v.center, rot: v.rotation.to_radians() }
     }
+    pub(crate) fn xform(&self) -> craft_view::ViewXform {
+        craft_view::ViewXform { rect: self.rect, centre: [self.center.x, self.center.y], zoom: self.zoom, rotation: self.rot, ppp: 1.0, aspect: 1.0 }
+    }
     pub fn to_screen(&self, p: Point) -> Pos2 {
-        let c = self.rect.center();
-        let (dx, dy) = ((p.x - self.center.x) * self.zoom, (p.y - self.center.y) * self.zoom);
-        let (sn, cs) = self.rot.sin_cos();
-        pos2(c.x + (dx * cs - dy * sn) as f32, c.y + (dx * sn + dy * cs) as f32)
+        self.xform().to_screen([p.x, p.y])
     }
     pub fn to_doc(&self, p: Pos2) -> Point {
-        let c = self.rect.center();
-        let (dx, dy) = ((p.x - c.x) as f64, (p.y - c.y) as f64);
-        let (sn, cs) = self.rot.sin_cos();
-        let (ux, uy) = (dx * cs + dy * sn, -dx * sn + dy * cs);
-        Point::new(self.center.x + ux / self.zoom, self.center.y + uy / self.zoom)
+        Point::from(craft_view::doc_tuple(self.xform().to_doc(p)))
     }
     /// Screen-space corners of a document rect (a rotated quad when the view is rotated).
     pub fn quad(&self, r: Rect) -> Vec<Pos2> {
@@ -116,9 +112,7 @@ impl Xf {
     }
     /// Convert a screen-space delta to a document delta.
     pub fn delta_to_doc(&self, d: egui::Vec2) -> vectorcraft_geom::Vec2 {
-        let (sn, cs) = self.rot.sin_cos();
-        let (dx, dy) = (d.x as f64, d.y as f64);
-        vectorcraft_geom::Vec2::new((dx * cs + dy * sn) / self.zoom, (-dx * sn + dy * cs) / self.zoom)
+        vectorcraft_geom::Vec2::from(craft_view::doc_tuple(self.xform().unmap_vec(d)))
     }
     pub fn rect_to_screen(&self, r: Rect) -> egui::Rect {
         egui::Rect::from_two_pos(self.to_screen(Point::new(r.x0, r.y0)), self.to_screen(Point::new(r.x1, r.y1)))

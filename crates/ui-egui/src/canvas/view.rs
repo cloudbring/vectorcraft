@@ -1,5 +1,6 @@
 use super::drag::{drag_id, drop_press};
 use super::{CornerRadius, Drag, Point, Pos2, Rect, SCROLL_BAR, Sense, Stroke, Tokens, Ui, VectorcraftApp, View, Xf, pos2, vec2};
+use craft_view::{Anchor, FitMode, ViewXform, ZoomPolicy, doc_tuple};
 
 /// Fit the view (View → Fit Artboard / Fit All / Actual Size, Arrange Tools › Zoom to Selection).
 pub fn fit(app: &mut VectorcraftApp, how: &str) {
@@ -20,26 +21,23 @@ pub fn fit(app: &mut VectorcraftApp, how: &str) {
         _ => st.doc.artboards.get(current).or(st.doc.artboards.first()).map(|a| a.rect),
     };
     let Some(target) = target else { return };
-    let zoom = if how == "view.actualSize" {
-        actual_size_zoom(app.session.prefs.display_print_size)
-    } else {
-        fit_zoom(rect, target, app.view().map_or(0.0, |v| v.rotation))
-    };
+    let actual = (how == "view.actualSize").then(|| actual_size_zoom(app.session.prefs.display_print_size));
     let Some(v) = app.view_mut() else { return };
-    v.center = target.center();
+    with_xform(v, rect, |xf| {
+        xf.fit_with_mode([[target.x0, target.y0], [target.x1, target.y1]], 30.0, FitMode::Contain, &ZOOM_POLICY);
+        if let Some(zoom) = actual {
+            xf.set_zoom_keep_centre(zoom, &ZOOM_POLICY);
+        }
+    });
     v.fitted = true;
-    v.zoom = zoom;
 }
 
 /// The zoom at which `target`, turned `rotation` degrees with the view, fits in `rect` with a
 /// 30-point margin on each side.
 pub(super) fn fit_zoom(rect: egui::Rect, target: Rect, rotation: f64) -> f64 {
-    // The width and height of the box round the target turned with the view, at zoom 1.
-    let (sn, cs) = rotation.to_radians().sin_cos();
-    let (w, h) = (target.width(), target.height());
-    let zx = (rect.width() as f64 - 60.0) / (w * cs.abs() + h * sn.abs()).max(1.0);
-    let zy = (rect.height() as f64 - 60.0) / (w * sn.abs() + h * cs.abs()).max(1.0);
-    zx.min(zy).clamp(0.0313, 640.0)
+    let mut v = View { rotation, ..View::default() };
+    with_xform(&mut v, rect, |xf| xf.fit_with_mode([[target.x0, target.y0], [target.x1, target.y1]], 30.0, FitMode::Contain, &ZOOM_POLICY));
+    v.zoom
 }
 
 /// How much one point of wheel motion zooms (as `exp(points × WHEEL_ZOOM)`).
@@ -85,28 +83,31 @@ pub(crate) fn actual_size_zoom(display_print_size: bool) -> f64 {
     if display_print_size { 96.0 / 72.0 } else { 1.0 }
 }
 
+const ZOOM_POLICY: ZoomPolicy = ZoomPolicy { min: 0.0313, max: 640.0, steps: &[], anchor: Anchor::Pointer };
+
+fn with_xform(vm: &mut View, rect: egui::Rect, f: impl FnOnce(&mut ViewXform)) -> f64 {
+    let mut xf = Xf::new(rect, vm).xform();
+    f(&mut xf);
+    (vm.center, vm.zoom) = (Point::from(doc_tuple(xf.centre)), xf.zoom);
+    vectorcraft_geom::normalize_deg(xf.rotation_degrees())
+}
+
 /// Zoom view `vm` of the canvas `rect` to `zoom` (clamped to the zoom range), keeping the document
 /// point under screen point `p` where it is.
 pub(super) fn zoom_about(vm: &mut View, rect: egui::Rect, p: Pos2, zoom: f64) {
-    let before = Xf::new(rect, vm).to_doc(p);
-    vm.zoom = zoom.clamp(0.0313, 640.0);
-    vm.center += before - Xf::new(rect, vm).to_doc(p);
+    with_xform(vm, rect, |xf| xf.zoom_about(p, zoom, &ZOOM_POLICY));
 }
 
 /// Turn view `vm` of the canvas `rect` by `degrees` clockwise, keeping the document point under
 /// screen point `p` where it is.
 pub(super) fn rotate_about(vm: &mut View, rect: egui::Rect, p: Pos2, degrees: f64) {
-    let before = Xf::new(rect, vm).to_doc(p);
-    vm.rotation = vectorcraft_geom::normalize_deg(vm.rotation + degrees);
-    vm.center += before - Xf::new(rect, vm).to_doc(p);
+    vm.rotation = with_xform(vm, rect, |xf| xf.rotate_about(p, degrees.to_radians()));
 }
 
 /// Move view `vm`'s content by `(dx, dy)` device pixels along the screen's axes, at `ppp` device
 /// pixels a point: the canvas's frame moves by exactly those pixels.
 pub(super) fn pan_pixels(vm: &mut View, ppp: f32, (dx, dy): (f64, f64)) {
-    let (sn, cs) = vm.rotation.to_radians().sin_cos();
-    let k = vm.zoom * f64::from(ppp);
-    vm.center -= vectorcraft_geom::Vec2::new((dx * cs + dy * sn) / k, (-dx * sn + dy * cs) / k);
+    with_xform(vm, egui::Rect::NOTHING, |xf| xf.pan_pixels(ppp, (dx, dy)));
 }
 
 /// Screen points `d` in the nearest whole device pixels, at `ppp` device pixels a point.
@@ -455,5 +456,96 @@ pub(super) fn touch_gestures(app: &mut VectorcraftApp, ui: &Ui, rect: egui::Rect
         && app.ui.screen_mode < 3
     {
         crate::menus::invoke(app, cmd, serde_json::json!({}));
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    struct OldXf(egui::Rect, f64, Point, f64);
+    impl OldXf {
+        fn new(rect: egui::Rect, v: &View) -> Self {
+            Self(rect, v.zoom, v.center, v.rotation.to_radians())
+        }
+        fn to_screen(&self, p: Point) -> Pos2 {
+            let (c, (sn, cs)) = (self.0.center(), self.3.sin_cos());
+            let (dx, dy) = ((p.x - self.2.x) * self.1, (p.y - self.2.y) * self.1);
+            pos2(c.x + (dx * cs - dy * sn) as f32, c.y + (dx * sn + dy * cs) as f32)
+        }
+        fn to_doc(&self, p: Pos2) -> Point {
+            let (c, (sn, cs)) = (self.0.center(), self.3.sin_cos());
+            let (dx, dy) = ((p.x - c.x) as f64, (p.y - c.y) as f64);
+            Point::new(self.2.x + (dx * cs + dy * sn) / self.1, self.2.y + (-dx * sn + dy * cs) / self.1)
+        }
+    }
+    fn old_zoom_about(vm: &mut View, rect: egui::Rect, p: Pos2, zoom: f64) {
+        let before = OldXf::new(rect, vm).to_doc(p);
+        vm.zoom = zoom.clamp(0.0313, 640.0);
+        vm.center += before - OldXf::new(rect, vm).to_doc(p);
+    }
+    fn old_rotate_about(vm: &mut View, rect: egui::Rect, p: Pos2, degrees: f64) {
+        let before = OldXf::new(rect, vm).to_doc(p);
+        vm.rotation = vectorcraft_geom::normalize_deg(vm.rotation + degrees);
+        vm.center += before - OldXf::new(rect, vm).to_doc(p);
+    }
+    fn old_pan_pixels(vm: &mut View, ppp: f32, (dx, dy): (f64, f64)) {
+        let ((sn, cs), k) = (vm.rotation.to_radians().sin_cos(), vm.zoom * f64::from(ppp));
+        vm.center -= vectorcraft_geom::Vec2::new((dx * cs + dy * sn) / k, (-dx * sn + dy * cs) / k);
+    }
+    fn old_fit_zoom(rect: egui::Rect, target: Rect, rotation: f64) -> f64 {
+        let ((sn, cs), (w, h)) = (rotation.to_radians().sin_cos(), (target.width(), target.height()));
+        let zx = (rect.width() as f64 - 60.0) / (w * cs.abs() + h * sn.abs()).max(1.0);
+        let zy = (rect.height() as f64 - 60.0) / (w * sn.abs() + h * cs.abs()).max(1.0);
+        zx.min(zy).clamp(0.0313, 640.0)
+    }
+    fn sample(seed: &mut u64, min: f64, max: f64) -> f64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        min + ((*seed >> 11) as f64 / (1_u64 << 53) as f64) * (max - min)
+    }
+    fn same(a: &View, b: &View) {
+        assert!((a.center.x - b.center.x).abs() <= 1e-9 && (a.center.y - b.center.y).abs() <= 1e-9);
+        assert!(a.zoom == b.zoom && (a.rotation - b.rotation).abs() <= 1e-12);
+    }
+    #[test]
+    fn shared_view_matches_previous_algebra() {
+        let mut s = 72;
+        for i in 0..2000 {
+            let mut r32 = |lo, hi| (sample(&mut s, lo, hi) as f32).round();
+            let rect = egui::Rect::from_min_size(pos2(r32(-500.0, 500.0), r32(-500.0, 500.0)), vec2(r32(61.0, 2000.0), r32(61.0, 2000.0)));
+            let pt = pos2(r32(-500.0, 2500.0), r32(-500.0, 2500.0));
+            let vm = View {
+                center: Point::new(sample(&mut s, -1000.0, 1000.0), sample(&mut s, -1000.0, 1000.0)),
+                zoom: sample(&mut s, 0.0313, 640.0),
+                rotation: sample(&mut s, -179.0, 179.0),
+                ..View::default()
+            };
+            let doc_pt = vm.center + vectorcraft_geom::Vec2::new(sample(&mut s, -500.0, 500.0) / vm.zoom, sample(&mut s, -500.0, 500.0) / vm.zoom);
+            let (ds, dd) = (
+                Xf::new(rect, &vm).to_screen(doc_pt) - OldXf::new(rect, &vm).to_screen(doc_pt),
+                Xf::new(rect, &vm).to_doc(pt) - OldXf::new(rect, &vm).to_doc(pt),
+            );
+            assert!(ds.x.abs() <= 1e-3 && ds.y.abs() <= 1e-3 && dd.x.abs() <= 1e-9 && dd.y.abs() <= 1e-9);
+            let (ppp, z, deg, d) = (
+                [1.0, 1.5, 2.0][i % 3],
+                sample(&mut s, 0.5, 640.0),
+                sample(&mut s, -180.0, 180.0),
+                (sample(&mut s, -1000.0, 1000.0), sample(&mut s, -1000.0, 1000.0)),
+            );
+            let (mut a, mut b) = (vm, vm);
+            zoom_about(&mut a, rect, pt, z);
+            old_zoom_about(&mut b, rect, pt, z);
+            same(&a, &b);
+            (a, b) = (vm, vm);
+            rotate_about(&mut a, rect, pt, deg);
+            old_rotate_about(&mut b, rect, pt, deg);
+            same(&a, &b);
+            (a, b) = (vm, vm);
+            pan_pixels(&mut a, ppp, d);
+            old_pan_pixels(&mut b, ppp, d);
+            same(&a, &b);
+            let target = Rect::new(0.0, 0.0, sample(&mut s, 1.0, 2000.0), sample(&mut s, 1.0, 2000.0));
+            assert!((fit_zoom(rect, target, vm.rotation) - old_fit_zoom(rect, target, vm.rotation)).abs() <= 1e-12);
+        }
     }
 }
