@@ -11,6 +11,8 @@ rust-version = "1.95"
 repository = "https://github.com/storytold/vectorcraft"
 
 [workspace.dependencies]
+# TODO: repoint to storytold/craft-libs after upstream merge
+craft-view = { git = "https://github.com/cloudbring/craft-libs", branch = "algo/integration" }
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", default-features = false, features = ["interpret", "write"] }
 craft-print = { git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0" }

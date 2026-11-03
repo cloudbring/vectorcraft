@@ -1093,6 +1093,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-view"
+version = "0.1.0"
+source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#77d3e6039224e2ae017701cb7051ab7abb1ee9a2"
+dependencies = [
+ "emath",
+]
+
+[[package]]
 name = "craft-window"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=92d392cff132eaf53e13afff77f38b5c11b73aa0#92d392cff132eaf53e13afff77f38b5c11b73aa0"
@@ -6554,6 +6562,7 @@ dependencies = [
  "craft-keymap",
  "craft-ui",
  "craft-update",
+ "craft-view",
  "egui",
  "egui_extras",
  "egui_kittest",
