@@ -1,5 +1,5 @@
 use super::build::segment_distance;
-use super::rings::{MAX_PLANE_POINTS, contains, left, rings, signed_area};
+use super::rings::{MAX_PLANE_POINTS, left, rings, signed_area};
 use super::{FillRule, PathData, Point, Rect, Vec2};
 
 /// The edges of `rings` filed in a grid of square buckets, so the nearest edge to a point is
@@ -154,7 +154,15 @@ impl Edges {
 
 /// Is `p` filled by `rings` (nonzero winding, as they are oriented)?
 pub(super) fn filled(rings: &[Vec<Point>], p: Point) -> bool {
-    rings.iter().filter(|r| contains(r, p)).count() % 2 == 1
+    let mut winding = 0i64;
+    for ring in rings {
+        for (a, b) in ring.iter().zip(ring.iter().cycle().skip(1)).take(ring.len()) {
+            if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+                winding += if b.y > a.y { 1 } else { -1 };
+            }
+        }
+    }
+    winding != 0
 }
 
 /// `ring` cut to the rectangle `cell` (Sutherland–Hodgman: the rectangle is convex, the ring
@@ -397,4 +405,30 @@ pub(super) fn material(outline: &[(Rect, vectorcraft_geom::SubPath)], cell: Rect
         vectorcraft_pathops::try_boolean(&r, rule, &near, rule, vectorcraft_pathops::BoolOp::Intersect, vectorcraft_pathops::DEFAULT_PRECISION)
             .ok()?;
     rings(&part, rule, cell.width(), MAX_PLANE_POINTS).ok()
+}
+
+#[cfg(test)]
+mod winding_tests {
+    use super::*;
+
+    #[test]
+    fn self_overlapping_ring_uses_nonzero_winding() {
+        let ring = vec![Point::new(0.0, 3.0), Point::new(2.0, -3.0), Point::new(-3.0, 1.0), Point::new(3.0, 1.0), Point::new(-2.0, -3.0)];
+        assert!(filled(std::slice::from_ref(&ring), Point::new(0.0, 0.0)));
+        assert!(!filled(std::slice::from_ref(&ring), Point::new(4.0, 0.0)));
+        let mut reversed = ring.clone();
+        reversed.reverse();
+        assert!(filled(std::slice::from_ref(&reversed), Point::new(0.0, 0.0)));
+        assert!(!filled(&[ring, reversed], Point::new(0.0, 0.0)));
+    }
+
+    #[test]
+    fn nested_rings_respect_orientation() {
+        let outer = vec![Point::new(0.0, 0.0), Point::new(4.0, 0.0), Point::new(4.0, 4.0), Point::new(0.0, 4.0)];
+        let inner = vec![Point::new(1.0, 1.0), Point::new(3.0, 1.0), Point::new(3.0, 3.0), Point::new(1.0, 3.0)];
+        assert!(filled(&[outer.clone(), inner.clone()], Point::new(2.0, 2.0)));
+        let mut hole = inner;
+        hole.reverse();
+        assert!(!filled(&[outer, hole], Point::new(2.0, 2.0)));
+    }
 }
