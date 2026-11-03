@@ -12,7 +12,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use vectorcraft_ui_egui::ControlRequest;
@@ -66,10 +66,26 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
             return rx;
         }
     };
+    let token = match vectorcraft_mcp::security::generate_token() {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("vectorcraft: control server cannot generate token: {error}");
+            return rx;
+        }
+    };
+    if let Some(path) = std::env::var_os("VECTORCRAFT_CONTROL_TOKEN_FILE") {
+        if let Err(error) = vectorcraft_mcp::security::write_token(std::path::Path::new(&path), &token) {
+            eprintln!("vectorcraft: control server cannot create token file: {error}");
+            return rx;
+        }
+        eprintln!("vectorcraft: control token file: {}", std::path::Path::new(&path).display());
+    } else {
+        eprintln!("vectorcraft: control token: {token}");
+    }
     eprintln!("vectorcraft: control server listening on 127.0.0.1:{port}");
     #[cfg(target_os = "macos")]
     keep_answering();
-    std::thread::spawn(move || accept_loop(listener, tx, ctx));
+    std::thread::spawn(move || accept_loop(listener, tx, ctx, token));
     rx
 }
 
@@ -92,8 +108,9 @@ fn keep_answering() {
     std::mem::forget(activity);
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context) {
+fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: String) {
     let open = Arc::new(AtomicUsize::new(0));
+    let token = Arc::new(token);
     for stream in listener.incoming().flatten() {
         let Some(slot) = acquire_slot(&open) else {
             let mut out = DeadlineWriter::new(stream, ConnectionTimeouts::default().write);
@@ -103,7 +120,7 @@ fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Con
             }
             continue;
         };
-        if let Err(e) = spawn_connection(stream, tx.clone(), ctx.clone(), slot, ConnectionTimeouts::default()) {
+        if let Err(e) = spawn_connection(stream, tx.clone(), ctx.clone(), slot, ConnectionTimeouts::default(), Arc::clone(&token)) {
             eprintln!("vectorcraft: control worker failed to start: {e}");
         }
     }
@@ -137,9 +154,14 @@ fn spawn_connection(
     ctx: egui::Context,
     slot: ConnectionSlot,
     timeouts: ConnectionTimeouts,
+    token: Arc<String>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name("vectorcraft-control".into()).spawn(move || {
         let _slot = slot;
+        let mut stream = stream;
+        if stream.set_write_timeout(Some(timeouts.write)).is_err() || !authenticate(&mut stream, &token) {
+            return;
+        }
         serve_socket(stream, timeouts, |method, params| {
             let (req, rrx) = ControlRequest::new(method, params);
             let ticket = req.ticket();
@@ -148,6 +170,41 @@ fn spawn_connection(
             Some(rrx.recv_timeout(REPLY_WAIT).unwrap_or_else(|_| timed_out(&ticket)))
         });
     })
+}
+
+fn authenticate(stream: &mut TcpStream, expected: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = Vec::new();
+    let mut complete = false;
+    while line.len() < 1024 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return false;
+        }
+        let mut byte = [0];
+        if stream.read_exact(&mut byte).is_err() {
+            return false;
+        }
+        if byte[0] == b'\n' {
+            complete = true;
+            break;
+        }
+        line.push(byte[0]);
+    }
+    let request: Value = serde_json::from_slice(&line).unwrap_or(Value::Null);
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let supplied = request.get("params").and_then(|params| params.get("token")).and_then(Value::as_str).unwrap_or("");
+    let valid =
+        complete && request.get("method").and_then(Value::as_str) == Some("auth") && vectorcraft_mcp::security::token_matches(expected, supplied);
+    if !valid {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let response = if valid {
+        json!({"id":id,"ok":true,"result":{"authenticated":true}})
+    } else {
+        json!({"id":id,"ok":false,"error":"authentication required"})
+    };
+    writeln!(stream, "{response}").is_ok() && valid
 }
 
 fn serve_socket(stream: TcpStream, timeouts: ConnectionTimeouts, handle: impl FnMut(String, Value) -> Option<Value>) {

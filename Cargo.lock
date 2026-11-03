@@ -6100,6 +6100,7 @@ dependencies = [
  "smithay-clipboard",
  "socket2",
  "vectorcraft-engine",
+ "vectorcraft-mcp",
  "vectorcraft-render",
  "vectorcraft-text",
  "vectorcraft-ui-egui",
@@ -6321,11 +6322,13 @@ dependencies = [
 name = "vectorcraft-mcp"
 version = "0.21.0"
 dependencies = [
+ "getrandom 0.3.4",
  "image",
  "log",
  "proptest",
  "serde_json",
  "socket2",
+ "subtle",
  "vectorcraft-doc",
  "vectorcraft-engine",
  "vectorcraft-format",

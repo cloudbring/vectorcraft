@@ -73,6 +73,7 @@ vectorcraft-cli — VectorCraft automation
 
 USAGE:
   vectorcraft-cli mcp [--connect ADDR | --headless] [--automation-read-root DIR]... [--automation-write-root DIR]...
+    Remote connections require VECTORCRAFT_CONTROL_TOKEN or VECTORCRAFT_CONTROL_TOKEN_FILE.
       Run the MCP server on stdio. Default: connect to a running app at 127.0.0.1:7979
       (vectorcraft --control 7979), falling back to a headless in-process session.
       --automation-read-root / --automation-write-root confine the files the agent's commands read
@@ -259,6 +260,9 @@ fn mcp(args: &[String]) -> Result<(), String> {
     } else {
         match Remote::connect(DEFAULT_ADDR) {
             Ok(r) => Box::new(r),
+            Err(error) if std::env::var_os("VECTORCRAFT_CONTROL_TOKEN").is_some() || std::env::var_os("VECTORCRAFT_CONTROL_TOKEN_FILE").is_some() => {
+                return Err(format!("cannot connect to {DEFAULT_ADDR}: {error}"));
+            }
             Err(_) => Box::new(with_stores(Headless::with_document())),
         }
     };

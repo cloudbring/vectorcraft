@@ -20,6 +20,7 @@ pub trait Backend {
 /// A running VectorCraft app, reached through its loopback control port.
 pub struct Remote {
     addr: String,
+    token: String,
     conn: Option<(BufReader<TcpStream>, TcpStream)>,
     next_id: u64,
 }
@@ -33,7 +34,11 @@ const MAX_REPLY_BYTES: usize = 256 * 1024 * 1024;
 impl Remote {
     /// Connect to `addr` (e.g. `127.0.0.1:7979`), failing fast when nothing is listening.
     pub fn connect(addr: &str) -> std::io::Result<Self> {
-        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1 };
+        Self::connect_with_token(addr, crate::security::client_token()?)
+    }
+
+    pub fn connect_with_token(addr: &str, token: String) -> std::io::Result<Self> {
+        let mut r = Self { addr: addr.to_string(), token, conn: None, next_id: 1 };
         r.reconnect()?;
         Ok(r)
     }
@@ -51,13 +56,32 @@ impl Remote {
         self.conn = None;
         let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, format!("cannot resolve {}", self.addr));
         for sa in self.addr.to_socket_addrs()? {
+            if !matches!(sa.ip(), std::net::IpAddr::V4(ip) if ip == std::net::Ipv4Addr::LOCALHOST) {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "control connections must use 127.0.0.1"));
+            }
             match TcpStream::connect_timeout(&sa, Duration::from_millis(800)) {
-                Ok(s) => {
+                Ok(mut s) => {
                     s.set_nodelay(true).ok();
                     // The app answers within 60 s (its own timeout); leave headroom.
                     s.set_read_timeout(Some(Duration::from_secs(90))).ok();
-                    let read = s.try_clone()?;
-                    self.conn = Some((BufReader::new(read), s));
+                    use std::io::{BufRead, Read};
+                    s.set_write_timeout(Some(Duration::from_secs(10)))?;
+                    s.set_read_timeout(Some(Duration::from_secs(10)))?;
+                    writeln!(s, "{}", json!({"id":0,"method":"auth","params":{"token":self.token}}))?;
+                    let mut reader = BufReader::new(s.try_clone()?);
+                    let mut reply = Vec::new();
+                    reader.by_ref().take(4097).read_until(b'\n', &mut reply)?;
+                    let response: Value = serde_json::from_slice(&reply).map_err(|_| std::io::Error::other("invalid authentication reply"))?;
+                    if reply.len() > 4096
+                        || reply.last() != Some(&b'\n')
+                        || response["id"] != 0
+                        || response["ok"] != true
+                        || response["result"]["authenticated"] != true
+                    {
+                        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "control authentication failed"));
+                    }
+                    s.set_read_timeout(Some(Duration::from_secs(90)))?;
+                    self.conn = Some((reader, s));
                     return Ok(());
                 }
                 Err(e) => last = e,

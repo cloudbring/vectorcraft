@@ -161,10 +161,14 @@ fn timed_out_worker_returns_its_connection_slot() {
     let slot = acquire_slot(&open).unwrap();
     assert!(acquire_slot(&open).is_none());
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (stream, _) = listener.accept().unwrap();
     let (tx, _rx) = channel();
-    let worker = spawn_connection(stream, tx, egui::Context::default(), slot, short_timeouts()).unwrap();
+    let token = "a".repeat(64);
+    let worker = spawn_connection(stream, tx, egui::Context::default(), slot, short_timeouts(), Arc::new(token.clone())).unwrap();
+    writeln!(client, "{}", json!({"id":0,"method":"auth","params":{"token":token}})).unwrap();
+    let mut response = String::new();
+    BufReader::new(client.try_clone().unwrap()).read_line(&mut response).unwrap();
     let start = std::time::Instant::now();
     while open.load(Ordering::SeqCst) == MAX_CONNECTIONS && start.elapsed() < WAIT {
         std::thread::sleep(Duration::from_millis(10));
@@ -380,7 +384,7 @@ fn extra_connections_are_refused() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, _rx) = channel::<ControlRequest>();
-    std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default()));
+    std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default(), "a".repeat(64)));
     // Idle connections are accepted in order and held open.
     let held: Vec<TcpStream> = (0..16).map(|_| TcpStream::connect(addr).unwrap()).collect();
     let mut extra = TcpStream::connect(addr).unwrap();
@@ -402,4 +406,50 @@ fn the_control_channel_keeps_the_app_at_full_priority_on_macos() {
     assert!(options.contains(NSActivityOptions::UserInitiatedAllowingIdleSystemSleep));
     assert!(!options.contains(NSActivityOptions::IdleSystemSleepDisabled), "the channel must not keep the Mac awake");
     keep_answering();
+}
+fn auth_fixture() -> (TcpStream, Receiver<ControlRequest>, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    let (tx, rx) = channel();
+    let slot = acquire_slot(&Arc::new(AtomicUsize::new(0))).unwrap();
+    let worker = spawn_connection(stream, tx, egui::Context::default(), slot, short_timeouts(), Arc::new("a".repeat(64))).unwrap();
+    (client, rx, worker)
+}
+
+#[test]
+fn unauthenticated_command_never_dispatches() {
+    let (mut client, rx, worker) = auth_fixture();
+    writeln!(client, "{}", json!({"id":1,"method":"engine.execute","params":{"command":"file.new"}})).unwrap();
+    let mut response = String::new();
+    BufReader::new(&client).read_line(&mut response).unwrap();
+    assert!(response.contains("authentication required"));
+    worker.join().unwrap();
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn incorrect_token_is_rejected() {
+    let (mut client, rx, worker) = auth_fixture();
+    writeln!(client, "{}", json!({"id":0,"method":"auth","params":{"token":"b".repeat(64)}})).unwrap();
+    let mut response = String::new();
+    BufReader::new(&client).read_line(&mut response).unwrap();
+    assert!(response.contains("authentication required"));
+    worker.join().unwrap();
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn correct_token_allows_commands() {
+    let (mut client, rx, worker) = auth_fixture();
+    writeln!(client, "{}", json!({"id":0,"method":"auth","params":{"token":"a".repeat(64)}})).unwrap();
+    let mut response = String::new();
+    BufReader::new(&client).read_line(&mut response).unwrap();
+    assert!(response.contains("authenticated"));
+    writeln!(client, "{}", json!({"id":1,"method":"engine.execute","params":{"command":"file.new"}})).unwrap();
+    assert!(rx.recv_timeout(WAIT).is_ok());
+    drop(rx);
+    drop(client);
+    worker.join().unwrap();
 }

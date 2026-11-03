@@ -353,13 +353,14 @@ fn a_remote_call_stops_waiting_for_the_app_when_cancelled() {
     let (done, held) = mpsc::channel::<()>();
     let app = std::thread::spawn(move || {
         let (conn, _) = listener.accept().unwrap();
+        super::authenticate(&conn);
         let mut line = String::new();
         BufReader::new(conn.try_clone().unwrap()).read_line(&mut line).unwrap();
         // Hold the connection open until the test is done with it (or for `WAIT`).
         let _ = held.recv_timeout(WAIT);
         drop(conn);
     });
-    let mut remote = crate::Remote::connect(&addr).unwrap();
+    let mut remote = crate::Remote::connect_with_token(&addr, super::TEST_TOKEN.into()).unwrap();
     let token = cancel::CancelToken::new();
     let raise = token.clone();
     std::thread::spawn(move || {

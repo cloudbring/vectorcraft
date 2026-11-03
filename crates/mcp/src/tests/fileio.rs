@@ -101,6 +101,7 @@ fn recording_app() -> (String, std::thread::JoinHandle<Vec<Value>>) {
     let addr = listener.local_addr().unwrap().to_string();
     let h = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
+        super::authenticate(&stream);
         let mut out = stream.try_clone().unwrap();
         let mut seen = vec![];
         for line in BufReader::new(stream).lines() {
@@ -117,7 +118,7 @@ fn recording_app() -> (String, std::thread::JoinHandle<Vec<Value>>) {
 fn export_is_the_same_call_in_the_app_and_headless() {
     let args = json!({"format": "png", "artboard": 1, "options": {"scale": 2, "artboard": 0, "range": "1-2"}});
     let (addr, app) = recording_app();
-    let mut remote = Remote::connect(&addr).unwrap();
+    let mut remote = Remote::connect_with_token(&addr, super::TEST_TOKEN.into()).unwrap();
     assert!(!call_tool(&mut remote, "export", &args).is_error);
     drop(remote);
     let seen = app.join().unwrap();
@@ -271,7 +272,7 @@ fn save_file_warns_about_options_it_does_not_use() {
 fn save_file_is_the_same_call_in_the_app_and_headless() {
     let path = tmp("app.vectorcraft");
     let (addr, app) = recording_app();
-    let mut remote = Remote::connect(&addr).unwrap();
+    let mut remote = Remote::connect_with_token(&addr, super::TEST_TOKEN.into()).unwrap();
     let args = json!({"path": path, "compress": true, "version": 3, "preview": null, "options": {"preview": true}});
     assert!(!call_tool(&mut remote, "save_file", &args).is_error);
     drop(remote);

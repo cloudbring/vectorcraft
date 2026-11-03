@@ -4,6 +4,26 @@ use serde_json::{Value, json};
 
 use crate::{Backend, Headless, PROTOCOL_VERSION, Remote, Server, tool_definitions};
 
+const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn authenticate(stream: &std::net::TcpStream) {
+    let mut input = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    input.read_line(&mut line).unwrap();
+    let request: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(request["method"], "auth");
+    assert_eq!(request["params"]["token"], TEST_TOKEN);
+    writeln!(&mut stream.try_clone().unwrap(), "{}", json!({"id":0,"ok":true,"result":{"authenticated":true}})).unwrap();
+}
+
+fn connect_and_accept(listener: &std::net::TcpListener, addr: &str) -> (Remote, std::net::TcpStream) {
+    let addr = addr.to_owned();
+    let client = std::thread::spawn(move || Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap());
+    let (stream, _) = listener.accept().unwrap();
+    authenticate(&stream);
+    (client.join().unwrap(), stream)
+}
+
 mod batchdraw;
 mod concurrency;
 mod conventions;
@@ -713,6 +733,7 @@ fn fake_app() -> (String, std::thread::JoinHandle<Vec<Value>>) {
     let addr = listener.local_addr().unwrap().to_string();
     let h = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
+        authenticate(&stream);
         let mut out = stream.try_clone().unwrap();
         let mut seen = vec![];
         // A dialog is open until `ui.dialog.cancel` closes it; then `ui.dialog.set` is refused, as in the app.
@@ -743,7 +764,7 @@ fn fake_app() -> (String, std::thread::JoinHandle<Vec<Value>>) {
 #[test]
 fn remote_forwards_methods() {
     let (addr, h) = fake_app();
-    let mut s = Server::new(Box::new(Remote::connect(&addr).unwrap()));
+    let mut s = Server::new(Box::new(Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap()));
     let r = call(&mut s, 1, "inspect_document", json!({}));
     assert!(text_of(&r).contains("Remote"));
     let r = call(&mut s, 2, "run_command", json!({"command": "object.group"}));
@@ -763,7 +784,7 @@ fn remote_forwards_methods() {
 #[test]
 fn answer_dialog_sets_fields_in_order_then_confirms() {
     let (addr, h) = fake_app();
-    let mut s = Server::new(Box::new(Remote::connect(&addr).unwrap()));
+    let mut s = Server::new(Box::new(Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap()));
     let set = json!([{"field": "discard", "value": true}, {"field": "note"}]);
     let r = call(&mut s, 1, "answer_dialog", json!({"set": set, "action": "confirm"}));
     assert_eq!(r["isError"], false, "{r}");
@@ -800,7 +821,7 @@ fn answer_dialog_sets_fields_in_order_then_confirms() {
 #[test]
 fn answer_dialog_does_not_confirm_when_the_app_refuses_the_set() {
     let (addr, h) = fake_app();
-    let mut s = Server::new(Box::new(Remote::connect(&addr).unwrap()));
+    let mut s = Server::new(Box::new(Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap()));
     let r = call(&mut s, 1, "answer_dialog", json!({"action": "cancel"}));
     assert_eq!(r["isError"], false, "{r}");
     let set = json!([{"field": "copy", "value": true}, {"field": "dy", "value": 2}]);
@@ -848,6 +869,7 @@ fn remote_does_not_replay_when_edit_reply_is_lost() {
             stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(timeout)).unwrap();
             stream.set_write_timeout(Some(timeout)).unwrap();
+            authenticate(&stream);
             let mut out = stream.try_clone().unwrap();
             let mut reader = BufReader::new(stream);
             for _ in 0..2 {
@@ -871,7 +893,7 @@ fn remote_does_not_replay_when_edit_reply_is_lost() {
         panic!("document.inspect was not received");
     });
 
-    let mut remote = Remote::connect(&addr).unwrap();
+    let mut remote = Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap();
     let first = remote.call("engine.execute", json!({"command": "shape.rectangle", "params": {"x": 10, "y": 10, "width": 20, "height": 20}}));
     let next = remote.call("document.inspect", json!({}));
     let edits = h.join().unwrap();
@@ -885,7 +907,7 @@ fn remote_does_not_replay_when_edit_reply_is_lost() {
 #[test]
 fn remote_file_tools_send_absolute_paths() {
     let (addr, h) = fake_app();
-    let mut s = Server::new(Box::new(Remote::connect(&addr).unwrap()));
+    let mut s = Server::new(Box::new(Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap()));
     let given = std::env::temp_dir().join("given.svg");
     let given = given.to_str().unwrap();
     call(&mut s, 1, "open_file", json!({"path": "rel/in.svg"}));
@@ -1007,6 +1029,7 @@ fn remote_rejects_uncorrelated_replies_without_replaying() {
                 stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(timeout)).unwrap();
                 stream.set_write_timeout(Some(timeout)).unwrap();
+                authenticate(&stream);
                 let mut out = stream.try_clone().unwrap();
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
@@ -1023,7 +1046,7 @@ fn remote_rejects_uncorrelated_replies_without_replaying() {
             }
             seen
         });
-        let mut remote = Remote::connect(&addr).unwrap();
+        let mut remote = Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap();
         let first = remote.call("engine.execute", json!({"command": "shape.rectangle", "params": {"width": 20, "height": 20}}));
         let next = remote.call("document.inspect", json!({}));
         drop(remote);
@@ -1049,6 +1072,7 @@ fn remote_rejects_a_reply_with_a_mismatched_id_and_reconnects() {
         let mut seen = vec![];
         for stream in listener.incoming().flatten().take(2) {
             stream.set_read_timeout(Some(WAIT)).unwrap();
+            authenticate(&stream);
             let mut out = stream.try_clone().unwrap();
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
@@ -1064,7 +1088,7 @@ fn remote_rejects_a_reply_with_a_mismatched_id_and_reconnects() {
         }
         seen
     });
-    let mut remote = Remote::connect(&addr).unwrap();
+    let mut remote = Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap();
     let err = remote.call("engine.execute", json!({"command": "shape.rectangle", "params": {}})).expect_err("a stray reply must not be trusted");
     assert!(err.contains("mismatch"), "{err}");
     let good = remote.call("engine.execute", json!({"command": "shape.rectangle", "params": {}}));
@@ -1083,6 +1107,7 @@ fn remote_reports_the_reason_of_a_refusal_without_an_id() {
     let addr = listener.local_addr().unwrap().to_string();
     let h = std::thread::spawn(move || {
         let (mut refused, _) = listener.accept().unwrap();
+        authenticate(&refused);
         // The request is read first, so the refusal answers it and the close is orderly.
         refused.set_read_timeout(Some(WAIT)).unwrap();
         let _ = BufReader::new(refused.try_clone().unwrap()).read_line(&mut String::new());
@@ -1090,13 +1115,14 @@ fn remote_reports_the_reason_of_a_refusal_without_an_id() {
         drop(refused);
         let (stream, _) = listener.accept().unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
+        authenticate(&stream);
         let mut out = stream.try_clone().unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
         let msg: Value = serde_json::from_str(&line).unwrap();
         writeln!(out, "{}", json!({"ok": true, "result": 7, "id": msg["id"]})).unwrap();
     });
-    let mut remote = Remote::connect(&addr).unwrap();
+    let mut remote = Remote::connect_with_token(&addr, TEST_TOKEN.into()).unwrap();
     let err = remote.call("document.inspect", json!({})).expect_err("a refusal is an error");
     assert!(err.contains("too many control connections") && err.contains("nothing was run"), "{err}");
     assert!(!err.contains("mismatch") && !err.contains("may have completed"), "{err}");
@@ -1131,7 +1157,8 @@ fn remote_connect_fails_fast() {
     let held = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
     held.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into()).unwrap();
     let port = held.local_addr().unwrap().as_socket().unwrap().port();
-    let took = runs_until_faster_than(FAILED_CONNECT, || assert!(Remote::connect(&format!("127.0.0.1:{port}")).is_err()));
+    let took =
+        runs_until_faster_than(FAILED_CONNECT, || assert!(Remote::connect_with_token(&format!("127.0.0.1:{port}"), TEST_TOKEN.into()).is_err()));
     assert!(took.last() < Some(&FAILED_CONNECT), "took {took:?}");
     // Nothing else could listen there meanwhile.
     assert!(std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_err());
@@ -1156,8 +1183,7 @@ fn wait_for_remote_eof(remote: &Remote) {
 fn remote_edit_succeeds_once_when_app_restarts() {
     let listener = reusable_listener(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
     let addr = listener.local_addr().unwrap();
-    let mut remote = Remote::connect(&addr.to_string()).unwrap();
-    let (old_connection, _) = listener.accept().unwrap();
+    let (mut remote, old_connection) = connect_and_accept(&listener, &addr.to_string());
     let old_handle = std::thread::spawn(move || {
         let timeout = WAIT;
         old_connection.set_read_timeout(Some(timeout)).unwrap();
@@ -1198,6 +1224,7 @@ fn remote_edit_succeeds_once_when_app_restarts() {
         stream.set_nonblocking(false).unwrap();
         stream.set_read_timeout(Some(timeout)).unwrap();
         stream.set_write_timeout(Some(timeout)).unwrap();
+        authenticate(&stream);
         let mut writer = stream.try_clone().unwrap();
         let mut backend = Headless::with_document();
         let base = backend.call("document.inspect", json!({})).unwrap()["objects"].as_u64().unwrap();
@@ -1226,8 +1253,7 @@ fn remote_edit_succeeds_once_when_app_restarts() {
 fn remote_does_not_send_on_a_connection_with_a_stray_line() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let mut remote = Remote::connect(&addr).unwrap();
-    let (mut stale, _) = listener.accept().unwrap();
+    let (mut remote, mut stale) = connect_and_accept(&listener, &addr);
     stale.set_read_timeout(Some(WAIT)).unwrap();
     writeln!(stale, "{}", json!({"ok": false, "error": "idle"})).unwrap();
     let probe = remote.connection_probe();
@@ -1237,6 +1263,7 @@ fn remote_does_not_send_on_a_connection_with_a_stray_line() {
     let h = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
+        authenticate(&stream);
         let mut out = stream.try_clone().unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
@@ -1256,8 +1283,7 @@ fn remote_call_reports_nothing_sent_when_reconnect_is_refused() {
     let closed_remote = || {
         let listener = reusable_listener(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
         let addr = listener.local_addr().unwrap();
-        let remote = Remote::connect(&addr.to_string()).unwrap();
-        let (old_connection, _) = listener.accept().unwrap();
+        let (remote, old_connection) = connect_and_accept(&listener, &addr.to_string());
         drop(old_connection);
         drop(listener);
         wait_for_remote_eof(&remote);
