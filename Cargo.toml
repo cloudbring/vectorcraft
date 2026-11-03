@@ -23,6 +23,8 @@ craft-window = { git = "https://github.com/storytold/craft-libs", rev = "92d392c
 craft-vectorcraft-format = { git = "https://github.com/storytold/craft-libs", rev = "14d5dbb50c317b8747a9cf9eb35ab8a22515f137" }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "c5a1cbfb5f9049f9270955caffb5bee5997aebf7", features = ["egui"] }
+# TODO: repoint to storytold/craft-libs after upstream merge
+craft-metafile = { git = "https://github.com/cloudbring/craft-libs", branch = "algo/integration" }
 # internal
 vectorcraft-geom = { path = "crates/geom" }
 vectorcraft-color = { path = "crates/color" }

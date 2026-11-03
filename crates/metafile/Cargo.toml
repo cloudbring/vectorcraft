@@ -19,5 +19,7 @@ kurbo = { workspace = true }
 image = { workspace = true }
 
 [dev-dependencies]
+# TODO: repoint to storytold/craft-libs after upstream merge
+craft-metafile = { workspace = true }
 # The tests lay type out in the bundled fonts (the workspace leaves turning them on to the engine).
 vectorcraft-text = { workspace = true, features = ["bundled-fonts"] }
