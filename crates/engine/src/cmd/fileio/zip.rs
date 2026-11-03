@@ -1,134 +1,36 @@
-//! ZIP archives: several exported files as one download. [`store`] writes them uncompressed, and
-//! [`deflate`] deflates each file that gets smaller and stores the others.
-//!
-//! [`Archive`] reads the files of a ZIP archive, stored or deflated, as PKWARE's APPNOTE.TXT
-//! describes the format (<https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>).
+//! ZIP archives for exported files and guarded, bounded ZIP reads.
 
-use std::io::{Read as _, Write as _};
+use craft_archive::{BoundedInflate, DosTime, InflateError, Limits, Wrapper, ZipError, ZipLimits, ZipReader, ZipWriteLimits, ZipWriter};
+use std::io::Read as _;
 
-use flate2::Crc;
-
-/// The DOS date of every entry: 1980-01-01, the earliest a ZIP date can say (no clock on the web,
-/// and a fixed date keeps archives of the same files identical).
-const DOS_DATE: u16 = (1 << 5) | 1;
-/// The MS-DOS time and date [`store`] gives every entry: midnight on [`DOS_DATE`].
-pub const FIXED_TIME: (u16, u16) = (0, DOS_DATE);
-/// General purpose flag: file names are UTF-8.
-const UTF8_NAMES: u16 = 1 << 11;
-/// Version needed to extract: 2.0.
-const VERSION: u16 = 20;
-/// How many bytes of a file [`deflate`] compresses between two calls of its `stop`: 1 MiB.
+/// The MS-DOS time and date of every stored entry: midnight, 1980-01-01.
+pub const FIXED_TIME: (u16, u16) = (0, (1 << 5) | 1);
+/// Bytes compressed between cancellation checks.
 pub const DEFLATE_CHUNK: usize = 1 << 20;
+const MAX_READ_ENTRY: usize = 512 * 1024 * 1024;
 
-/// The archive of `files` (`(name, bytes)`; `/` separates folders in a name), stored without
-/// compression. Fails past the limits of a ZIP without its 64-bit extension (65534 files, 4 GB; 65535 is the ZIP64 marker).
-pub fn store<N: AsRef<str>, B: AsRef<[u8]>>(files: &[(N, B)]) -> Result<Vec<u8>, String> {
-    let too_big = || "too much to zip: at most 65534 files and 4 GB".to_string();
-    let count = u16::try_from(files.len()).ok().filter(|&c| c != u16::MAX).ok_or_else(too_big)?;
-    let mut out = Vec::with_capacity(files.iter().map(|(n, b)| 76 + 2 * n.as_ref().len() + b.as_ref().len()).sum::<usize>() + 22);
-    let mut central = Vec::new();
-    for (name, bytes) in files {
-        let (name, bytes) = (name.as_ref().as_bytes(), bytes.as_ref());
-        let offset = u32::try_from(out.len()).map_err(|_| too_big())?;
-        let size = u32::try_from(bytes.len()).map_err(|_| too_big())?;
-        let name_len = u16::try_from(name.len()).map_err(|_| format!("file name too long to zip: {}", String::from_utf8_lossy(name)))?;
-        let mut crc = Crc::new();
-        crc.update(bytes);
-        // The fields both headers share: flags, method (0: stored), time, date, CRC, sizes, name length.
-        let mut shared = Vec::with_capacity(26);
-        for v in [UTF8_NAMES, 0, 0, DOS_DATE] {
-            shared.extend_from_slice(&v.to_le_bytes());
-        }
-        for v in [crc.sum(), size, size] {
-            shared.extend_from_slice(&v.to_le_bytes());
-        }
-        shared.extend_from_slice(&name_len.to_le_bytes());
-        // Local file header.
-        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-        out.extend_from_slice(&VERSION.to_le_bytes());
-        out.extend_from_slice(&shared);
-        out.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-        out.extend_from_slice(name);
-        out.extend_from_slice(bytes);
-        // Central directory record.
-        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-        central.extend_from_slice(&VERSION.to_le_bytes()); // made by
-        central.extend_from_slice(&VERSION.to_le_bytes()); // needed to extract
-        central.extend_from_slice(&shared);
-        // Extra and comment lengths, disk number, internal and external attributes.
-        central.extend_from_slice(&[0; 2 + 2 + 2 + 2 + 4]);
-        central.extend_from_slice(&offset.to_le_bytes());
-        central.extend_from_slice(name);
-    }
-    let start = u32::try_from(out.len()).map_err(|_| too_big())?;
-    let central_len = u32::try_from(central.len()).map_err(|_| too_big())?;
-    out.extend_from_slice(&central);
-    // End of central directory.
-    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    out.extend_from_slice(&[0; 4]); // this disk, the directory's disk
-    out.extend_from_slice(&count.to_le_bytes());
-    out.extend_from_slice(&count.to_le_bytes());
-    out.extend_from_slice(&central_len.to_le_bytes());
-    out.extend_from_slice(&start.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // comment length
-    Ok(out)
+fn write_limits() -> ZipWriteLimits {
+    ZipWriteLimits { max_entries: 65534, max_entry_bytes: u32::MAX as u64 - 1, max_total_bytes: u32::MAX as u64 - 1 }
 }
 
-/// The archive of `files` (`(name, bytes)`; `/` separates folders in a name), each deflated, or
-/// stored when deflating doesn't make it smaller, every entry dated `(time, date)` (MS-DOS format).
-/// Fails past the same limits as [`store`]. `stop` is asked before each [`DEFLATE_CHUNK`] bytes are
-/// deflated; when it answers true, the archive is dropped and an error returned.
-pub fn deflate<N: AsRef<str>, B: AsRef<[u8]>>(files: &[(N, B)], (time, date): (u16, u16), stop: impl Fn() -> bool) -> Result<Vec<u8>, String> {
-    let too_big = || "too much to zip: at most 65534 files and 4 GB".to_string();
-    let (mut out, mut central) = (Vec::new(), Vec::new());
+/// Write the files without compression, within the classic ZIP limits.
+pub fn store<N: AsRef<str>, B: AsRef<[u8]>>(files: &[(N, B)]) -> Result<Vec<u8>, String> {
+    let mut writer = ZipWriter::with_limits(std::io::Cursor::new(Vec::new()), write_limits());
+    writer.set_time(DosTime { time: FIXED_TIME.0, date: FIXED_TIME.1 });
     for (name, bytes) in files {
-        let (name, bytes) = (name.as_ref(), bytes.as_ref());
-        let mut crc = Crc::new();
-        crc.update(bytes);
-        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-        for chunk in bytes.chunks(DEFLATE_CHUNK) {
-            if stop() {
-                return Err("stopped before the archive was finished".into());
-            }
-            enc.write_all(chunk).map_err(|e| e.to_string())?;
-        }
-        let deflated = enc.finish().map_err(|e| e.to_string())?;
-        let (method, data): (u16, &[u8]) = if deflated.len() < bytes.len() { (8, &deflated) } else { (0, bytes) };
-        let offset = u32::try_from(out.len()).map_err(|_| too_big())?;
-        let (packed, size) = (u32::try_from(data.len()).map_err(|_| too_big())?, u32::try_from(bytes.len()).map_err(|_| too_big())?);
-        let name_len = u16::try_from(name.len()).map_err(|_| format!("file name too long to zip: {name}"))?;
-        // Version 2.0, UTF-8 names, method, time, date, CRC-32, sizes, name length, no extra field.
-        let common =
-            [&VERSION.to_le_bytes()[..], &UTF8_NAMES.to_le_bytes(), &method.to_le_bytes(), &time.to_le_bytes(), &date.to_le_bytes()].concat();
-        let sums = [crc.sum().to_le_bytes(), packed.to_le_bytes(), size.to_le_bytes()].concat();
-        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-        out.extend_from_slice(&common);
-        out.extend_from_slice(&sums);
-        out.extend_from_slice(&name_len.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(data);
-        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-        central.extend_from_slice(&VERSION.to_le_bytes());
-        central.extend_from_slice(&common);
-        central.extend_from_slice(&sums);
-        central.extend_from_slice(&name_len.to_le_bytes());
-        // No extra field or comment, disk 0, no attributes.
-        central.extend_from_slice(&[0; 12]);
-        central.extend_from_slice(&offset.to_le_bytes());
-        central.extend_from_slice(name.as_bytes());
+        writer.add_stored(name.as_ref(), bytes.as_ref()).map_err(|error| error.to_string())?;
     }
-    let count = u16::try_from(files.len()).ok().filter(|&c| c != u16::MAX).ok_or_else(too_big)?;
-    let (start, len) = (u32::try_from(out.len()).map_err(|_| too_big())?, u32::try_from(central.len()).map_err(|_| too_big())?);
-    out.extend_from_slice(&central);
-    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    out.extend_from_slice(&[0; 4]);
-    out.extend_from_slice(&count.to_le_bytes());
-    out.extend_from_slice(&count.to_le_bytes());
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&start.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    Ok(out)
+    writer.finish().map(|cursor| cursor.into_inner()).map_err(|error| error.to_string())
+}
+
+/// Deflate each file if smaller; abandon the archive when `stop` requests cancellation.
+pub fn deflate<N: AsRef<str>, B: AsRef<[u8]>>(files: &[(N, B)], (time, date): (u16, u16), stop: impl Fn() -> bool) -> Result<Vec<u8>, String> {
+    let mut writer = ZipWriter::with_limits(std::io::Cursor::new(Vec::new()), write_limits());
+    writer.set_time(DosTime { time, date });
+    for (name, bytes) in files {
+        writer.add_deflated_if_smaller_with_stop(name.as_ref(), bytes.as_ref(), 6, &stop).map_err(|error| error.to_string())?;
+    }
+    writer.finish().map(|cursor| cursor.into_inner()).map_err(|error| error.to_string())
 }
 
 /// Does `bytes` start with a ZIP archive's first local file header?
@@ -139,195 +41,120 @@ pub fn is_zip(bytes: &[u8]) -> bool {
 /// Why [`Archive`] can't read an archive or one of its files.
 #[derive(Debug, PartialEq)]
 pub enum ReadError {
-    /// Not a ZIP archive: no end of central directory record.
     NotZip,
-    /// More files than the reader was asked to accept.
     TooManyFiles,
-    /// The archive needs the 64-bit (ZIP64) records, which the reader does not read.
     Zip64,
-    /// The file is encrypted.
     Encrypted(String),
-    /// The file is compressed with a method other than stored (0) or deflated (8).
     Method(String, u16),
-    /// The file unpacks to more bytes than the reader was asked to accept.
     TooLarge(String),
-    /// The archive (empty name) or the file is truncated, inconsistent or fails its CRC.
     Damaged(String),
 }
 
-/// One file of an archive, as its central directory record describes it.
-struct Entry {
-    name: String,
-    flags: u16,
-    method: u16,
-    crc: u32,
-    packed: usize,
-    size: usize,
-    local: usize,
+fn read_limits(max_files: usize, max_entry_bytes: u64) -> ZipLimits {
+    ZipLimits { max_entries: max_files, max_entry_bytes, max_total_bytes: 2 * 1024 * 1024 * 1024 }
 }
 
-/// A ZIP archive's files, listed from its central directory.
+fn read_error(error: ZipError, name: &str) -> ReadError {
+    match error {
+        ZipError::EntryCount => ReadError::TooManyFiles,
+        ZipError::EntryLimit | ZipError::TotalLimit => ReadError::TooLarge(name.to_owned()),
+        ZipError::Archive(zip::result::ZipError::CompressionMethodNotSupported(method)) => ReadError::Method(name.to_owned(), method),
+        ZipError::Archive(zip::result::ZipError::UnsupportedArchive(zip::result::ZipError::PASSWORD_REQUIRED))
+        | ZipError::Archive(zip::result::ZipError::InvalidPassword) => ReadError::Encrypted(name.to_owned()),
+        ZipError::UnsafePath(path) | ZipError::Symlink(path) => ReadError::Damaged(path),
+        _ => ReadError::Damaged(name.to_owned()),
+    }
+}
+
+fn understated_deflate_exceeds_limit(zip: &[u8], name: &str, max: usize) -> bool {
+    let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip)) else { return false };
+    let Ok(file) = archive.by_name(name) else { return false };
+    if file.compression() != zip::CompressionMethod::DEFLATE {
+        return false;
+    }
+    let Some(start) = file.data_start().and_then(|offset| usize::try_from(offset).ok()) else { return false };
+    let Some(end) = usize::try_from(file.compressed_size()).ok().and_then(|size| start.checked_add(size)) else { return false };
+    let Some(data) = zip.get(start..end) else { return false };
+    let limits = Limits { max_output: max as u64, max_input: data.len() as u64, max_ratio: u64::MAX, wrapper: Wrapper::Raw };
+    let Ok(mut inflater) = BoundedInflate::new(data, limits) else { return false };
+    let mut buffer = [0; 8192];
+    loop {
+        match inflater.read_chunk(&mut buffer) {
+            Err(InflateError::OutputLimit { .. }) => return true,
+            Ok(0) | Err(_) => return false,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Validated ZIP entries, retained in central-directory order.
 pub struct Archive<'a> {
     zip: &'a [u8],
-    entries: Vec<Entry>,
+    names: Vec<String>,
+    max_files: usize,
 }
 
 impl<'a> Archive<'a> {
-    /// The archive `zip`, with at most `max_files` files.
+    /// Open a ZIP containing at most `max_files` entries.
     pub fn open(zip: &'a [u8], max_files: usize) -> Result<Self, ReadError> {
-        let damaged = || ReadError::Damaged(String::new());
-        let u16_at = |at: usize| at.checked_add(2).and_then(|end| zip.get(at..end)).and_then(|b| b.try_into().ok()).map(u16::from_le_bytes);
-        let u32_at = |at: usize| at.checked_add(4).and_then(|end| zip.get(at..end)).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes);
-        // The end record is 22 bytes followed by a comment of at most 65535 bytes: the signature
-        // whose comment ends the archive, else the last signature (the archive has bytes after it).
-        let last = zip.len().checked_sub(22).ok_or(ReadError::NotZip)?;
-        let candidates = || (last.saturating_sub(0xFFFF)..=last).rev().filter(|&at| u32_at(at) == Some(0x0605_4b50));
-        let end =
-            candidates().find(|&at| u16_at(at + 20).map(usize::from) == Some(last - at)).or_else(|| candidates().next()).ok_or(ReadError::NotZip)?;
-        let count = u16_at(end + 10).ok_or_else(damaged)?;
-        let start = u32_at(end + 16).ok_or_else(damaged)?;
-        if count == 0xFFFF || start == 0xFFFF_FFFF || u32_at(end + 12) == Some(0xFFFF_FFFF) {
-            return Err(ReadError::Zip64);
-        }
-        let count = usize::from(count);
-        if count > max_files {
-            return Err(ReadError::TooManyFiles);
-        }
-        let mut at = start as usize;
-        let mut entries = Vec::with_capacity(count);
-        for _ in 0..count {
-            if u32_at(at) != Some(0x0201_4b50) {
-                return Err(damaged());
-            }
-            let short = |off: usize| at.checked_add(off).and_then(u16_at).ok_or_else(damaged);
-            let long = |off: usize| at.checked_add(off).and_then(u32_at).ok_or_else(damaged);
-            let (name_len, extra, comment) = (usize::from(short(28)?), usize::from(short(30)?), usize::from(short(32)?));
-            let name_at = at.checked_add(46).ok_or_else(damaged)?;
-            let name = name_at.checked_add(name_len).and_then(|end| zip.get(name_at..end)).ok_or_else(damaged)?;
-            entries.push(Entry {
-                name: String::from_utf8_lossy(name).into_owned(),
-                flags: short(8)?,
-                method: short(10)?,
-                crc: long(16)?,
-                packed: long(20)? as usize,
-                size: long(24)? as usize,
-                local: long(42)? as usize,
-            });
-            at = name_at.checked_add(name_len + extra + comment).ok_or_else(damaged)?;
-        }
-        Ok(Self { zip, entries })
+        let reader = ZipReader::open(zip, read_limits(max_files, MAX_READ_ENTRY as u64)).map_err(|error| {
+            if !is_zip(zip) && !zip.starts_with(&0x0605_4b50u32.to_le_bytes()) { ReadError::NotZip } else { read_error(error, "") }
+        })?;
+        Ok(Self { zip, names: reader.names().to_vec(), max_files })
     }
 
-    /// The file `name`, matched in any ASCII case.
-    fn entry(&self, name: &str) -> Option<&Entry> {
-        self.entries.iter().find(|e| e.name.eq_ignore_ascii_case(name))
-    }
-
-    /// Does the archive hold the file `name` (in any ASCII case)?
+    /// Check for an entry in any ASCII case.
     pub fn contains(&self, name: &str) -> bool {
-        self.entry(name).is_some()
+        self.names.iter().any(|entry| entry.eq_ignore_ascii_case(name))
     }
 
-    /// The bytes of the file `name` (matched in any ASCII case; None: the archive has no such
-    /// file), when it unpacks to at most `max` bytes and passes its CRC.
+    /// Read an entry in any ASCII case, never decompressing more than `max` bytes.
     pub fn read(&self, name: &str, max: usize) -> Result<Option<Vec<u8>>, ReadError> {
-        let Some(e) = self.entry(name) else { return Ok(None) };
-        let damaged = || ReadError::Damaged(e.name.clone());
-        if e.flags & 1 != 0 {
-            return Err(ReadError::Encrypted(e.name.clone()));
-        }
-        if e.size > max {
-            return Err(ReadError::TooLarge(e.name.clone()));
-        }
-        // The local header: its signature, then its name and extra field lengths at 26 and 28.
-        let header = e.local.checked_add(30).and_then(|end| self.zip.get(e.local..end)).ok_or_else(damaged)?;
-        let (Some(sig), Some(name_len), Some(extra)) = (header.get(..4), header.get(26..28), header.get(28..30)) else { return Err(damaged()) };
-        if sig != 0x0403_4b50u32.to_le_bytes() {
-            return Err(damaged());
-        }
-        let len = |b: &[u8]| b.try_into().map(|b| usize::from(u16::from_le_bytes(b))).map_err(|_| damaged());
-        let start = e.local + 30 + len(name_len)? + len(extra)?;
-        let data = start.checked_add(e.packed).and_then(|end| self.zip.get(start..end)).ok_or_else(damaged)?;
-        let bytes = match e.method {
-            0 if e.packed != e.size => return Err(damaged()),
-            0 => data.to_vec(),
-            8 => {
-                let mut out = Vec::with_capacity(e.size);
-                flate2::read::DeflateDecoder::new(data).take((max as u64).saturating_add(1)).read_to_end(&mut out).map_err(|_| damaged())?;
-                if out.len() > max {
-                    return Err(ReadError::TooLarge(e.name.clone()));
-                }
-                out
-            }
-            m => return Err(ReadError::Method(e.name.clone(), m)),
+        let max = max.min(MAX_READ_ENTRY);
+        let Some(entry) = self.names.iter().find(|entry| entry.eq_ignore_ascii_case(name)) else { return Ok(None) };
+        let mut reader = match ZipReader::open(self.zip, read_limits(self.max_files, max as u64)) {
+            Ok(reader) => reader,
+            Err(ZipError::EntryLimit) => return self.read_when_other_entry_exceeds_limit(entry, max).map(Some),
+            Err(error) => return Err(read_error(error, entry)),
         };
-        let mut crc = Crc::new();
-        crc.update(&bytes);
-        if bytes.len() != e.size || crc.sum() != e.crc {
-            return Err(damaged());
+        reader.read(entry).map_err(|error| {
+            if understated_deflate_exceeds_limit(self.zip, entry, max) { ReadError::TooLarge(entry.clone()) } else { read_error(error, entry) }
+        })
+    }
+
+    fn read_when_other_entry_exceeds_limit(&self, name: &str, max: usize) -> Result<Vec<u8>, ReadError> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(self.zip)).map_err(|error| read_error(ZipError::Archive(error), name))?;
+        let file = archive.by_name(name).map_err(|error| read_error(ZipError::Archive(error), name))?;
+        if file.size() > max as u64 {
+            return Err(ReadError::TooLarge(name.to_owned()));
         }
-        Ok(Some(bytes))
+        let mut bytes = Vec::new();
+        let result = file.take((max as u64).saturating_add(1)).read_to_end(&mut bytes);
+        if bytes.len() > max || (result.is_err() && understated_deflate_exceeds_limit(self.zip, name, max)) {
+            return Err(ReadError::TooLarge(name.to_owned()));
+        }
+        result.map_err(|error| read_error(ZipError::Io(error), name))?;
+        Ok(bytes)
     }
 }
 
-/// The entries of an archive written by [`store`] or [`deflate`] (read through its central
-/// directory, checking every CRC and size) → `(name, bytes)`.
+/// Decode every entry of a test archive, checking CRCs and decompressed sizes.
 #[cfg(test)]
 pub fn entries(zip: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let u16_at = |at: usize| zip.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]])).ok_or("truncated");
-    let u32_at = |at: usize| zip.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok_or("truncated");
-    let end = zip.len().checked_sub(22).ok_or("no end record")?;
-    if u32_at(end)? != 0x0605_4b50 {
-        return Err("no end record".into());
-    }
-    let count = u16_at(end + 10)? as usize;
-    let mut at = u32_at(end + 16)? as usize;
-    let mut out = vec![];
-    for _ in 0..count {
-        let method = u16_at(at + 10)?;
-        if u32_at(at)? != 0x0201_4b50 || (method != 0 && method != 8) {
-            return Err("not a stored or deflated central record".into());
-        }
-        let (crc, packed, name_len) = (u32_at(at + 16)?, u32_at(at + 20)? as usize, u16_at(at + 28)? as usize);
-        let size = u32_at(at + 24)? as usize;
-        let extra = u16_at(at + 30)? as usize + u16_at(at + 32)? as usize;
-        let local = u32_at(at + 42)? as usize;
-        let name = String::from_utf8(zip.get(at + 46..at + 46 + name_len).ok_or("truncated")?.to_vec()).map_err(|e| e.to_string())?;
-        if u32_at(local)? != 0x0403_4b50 {
-            return Err(format!("{name}: no local header"));
-        }
-        let data = local + 30 + u16_at(local + 26)? as usize + u16_at(local + 28)? as usize;
-        let data = zip.get(data..data + packed).ok_or("truncated")?;
-        let bytes = if method == 8 {
-            let mut inflated = Vec::new();
-            flate2::read::DeflateDecoder::new(data).read_to_end(&mut inflated).map_err(|e| format!("{name}: {e}"))?;
-            inflated
-        } else {
-            data.to_vec()
-        };
-        let mut c = Crc::new();
-        c.update(&bytes);
-        if c.sum() != crc || bytes.len() != size {
-            return Err(format!("{name}: CRC or size mismatch"));
-        }
-        out.push((name, bytes));
-        at += 46 + name_len + extra;
-    }
-    Ok(out)
+    let archive = Archive::open(zip, 65534).map_err(|error| format!("{error:?}"))?;
+    archive
+        .names
+        .iter()
+        .map(|name| {
+            archive.read(name, 512 * 1024 * 1024).map(|bytes| (name.clone(), bytes.unwrap_or_default())).map_err(|error| format!("{error:?}"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
-mod limit_tests {
-    use super::*;
+#[path = "zip_legacy_test.rs"]
+mod legacy;
 
-    #[test]
-    fn max_files_round_trip_through_the_reader() {
-        let at_limit: Vec<(String, &[u8])> = (0..65534).map(|i| (format!("{i}"), &[][..])).collect();
-        assert!(Archive::open(&store(&at_limit).unwrap(), usize::MAX).is_ok());
-        let deflated = deflate(&at_limit, FIXED_TIME, || false).unwrap();
-        assert!(Archive::open(&deflated, usize::MAX).is_ok());
-        let over: Vec<(String, &[u8])> = (0..65535).map(|i| (format!("{i}"), &[][..])).collect();
-        assert!(store(&over).is_err());
-        assert!(deflate(&over, FIXED_TIME, || false).is_err());
-    }
-}
+#[cfg(test)]
+#[path = "zip_tests.rs"]
+mod tests;

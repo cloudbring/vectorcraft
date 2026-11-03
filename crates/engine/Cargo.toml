@@ -17,6 +17,8 @@ bundled-fonts = ["vectorcraft-text/bundled-fonts"]
 [dependencies]
 # Which paths stored in documents may be opened.
 craft-docpath = { workspace = true }
+craft-archive = { workspace = true }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 vectorcraft-geom = { workspace = true }
 vectorcraft-color = { workspace = true }
 vectorcraft-doc = { workspace = true }
