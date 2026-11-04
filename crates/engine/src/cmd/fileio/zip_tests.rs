@@ -92,3 +92,30 @@ fn small_entry_reads_when_another_entry_is_larger_than_its_limit() {
     assert_eq!(archive.read("SMALL", 1).unwrap(), Some(vec![1]));
     assert_eq!(archive.read("large", 1), Err(ReadError::TooLarge("large".into())));
 }
+
+/// Rewrite the compression method of the only entry, in its local and central headers.
+fn with_method(mut bytes: Vec<u8>, method: u16) -> Vec<u8> {
+    let at = |bytes: &[u8], signature: u32| bytes.windows(4).position(|window| window == signature.to_le_bytes()).unwrap();
+    let (local, central) = (at(&bytes, 0x0403_4b50), at(&bytes, 0x0201_4b50));
+    bytes[local + 8..local + 10].copy_from_slice(&method.to_le_bytes());
+    bytes[central + 10..central + 12].copy_from_slice(&method.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn an_unsupported_compression_method_is_a_method_error_not_damage() {
+    // Every method the pre-swap reader refused: all but stored (0) and deflated (8).
+    for method in (0..=u16::MAX).filter(|method| ![0, 8].contains(method)) {
+        let bytes = with_method(store(&[("data", vec![7; 64])]).unwrap(), method);
+        let archive = Archive::open(&bytes, 10).unwrap_or_else(|error| panic!("method {method}: open failed with {error:?}"));
+        assert_eq!(archive.read("DATA", 1 << 20), Err(ReadError::Method("data".into(), method)), "method {method}");
+    }
+}
+
+#[test]
+fn an_oversize_entry_is_too_large_before_its_method_is_considered() {
+    // The pre-swap reader checked the size cap before the method.
+    let bytes = with_method(store(&[("data", vec![7; 64])]).unwrap(), 12);
+    let archive = Archive::open(&bytes, 10).unwrap();
+    assert_eq!(archive.read("data", 8), Err(ReadError::TooLarge("data".into())));
+}

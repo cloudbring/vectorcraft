@@ -970,7 +970,7 @@ dependencies = [
 [[package]]
 name = "craft-archive"
 version = "0.1.0"
-source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#77d3e6039224e2ae017701cb7051ab7abb1ee9a2"
+source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#88330d1ada0d1771eceb501b1289fb0cd5717d79"
 dependencies = [
  "craft-hash",
  "flate2",
@@ -991,7 +991,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=92d392cff132eaf53e13af
 [[package]]
 name = "craft-hash"
 version = "0.1.0"
-source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#77d3e6039224e2ae017701cb7051ab7abb1ee9a2"
+source = "git+https://github.com/cloudbring/craft-libs?branch=algo%2Fintegration#88330d1ada0d1771eceb501b1289fb0cd5717d79"
 dependencies = [
  "sha2",
 ]
