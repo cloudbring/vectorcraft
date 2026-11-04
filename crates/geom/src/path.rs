@@ -559,7 +559,12 @@ impl PathData {
         }
         Some(curve_bounds(&bp))
     }
-    /// Bounds including control handles (used for quick culling).
+    /// Bounds including control handles (used for quick culling). Every segment is a Bezier curve, which for
+    /// `t` in `[0,1]` lies in the convex hull of its control points and so in their axis-aligned box:
+    /// the Lean theorems `CraftBezier.bez_mem_convexHull` and `CraftBezier.bez_mem_bbox` (craft-libs
+    /// `lean/bezier`, #216). This box therefore contains the whole path and is a sound early-out;
+    /// it is checked against sampled points in `tests/bezier_vectors.rs`. Use [`Self::bounds`] for
+    /// the tight box.
     pub fn control_bounds(&self) -> Option<Rect> {
         let mut it = self.subpaths.iter().flat_map(|s| s.anchors.iter()).flat_map(|a| [a.p, a.h_in, a.h_out]);
         let first = it.next()?;
