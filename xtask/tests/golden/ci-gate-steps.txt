@@ -1,0 +1,11 @@
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --keep-going -- -D warnings
+cargo nextest --version
+cargo nextest run --workspace --lib --bins --tests
+cargo test --workspace --doc
+cargo test -p vectorcraft-text --no-default-features --test without_bundled_fonts
+cargo clippy -p vectorcraft-ui-egui --no-default-features --all-targets -- -D warnings
+cargo test -p vectorcraft-ui-egui --no-default-features --test install_fonts
+cargo test --workspace --lib --bins --tests -- i18n::tests::untranslated_report --exact --nocapture
+cargo check --target wasm32-unknown-unknown --keep-going -p vectorcraft-affinity -p vectorcraft-brush -p vectorcraft-cad -p vectorcraft-color -p vectorcraft-doc -p vectorcraft-effects -p vectorcraft-engine -p vectorcraft-eps -p vectorcraft-format -p vectorcraft-geom -p vectorcraft-metafile -p vectorcraft-pathops -p vectorcraft-pdf -p vectorcraft-plugins -p vectorcraft-render -p vectorcraft-scriptcheck -p vectorcraft-svg -p vectorcraft-text -p vectorcraft-three-d -p vectorcraft-tools -p vectorcraft-trace -p vectorcraft-ui-egui -p vectorcraft-web
+CI summary: all 12 steps passed (fmt, clippy, test, doctests, no-bundled-fonts, pdf-deps, assets, brands, cursors, i18n-report, layers, wasm)
