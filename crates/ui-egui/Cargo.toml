@@ -73,6 +73,7 @@ vectorcraft-testkit = { workspace = true }
 # A variable font built in code (no font file is committed).
 vectorcraft-text = { workspace = true, features = ["test-fonts"] }
 wat = { workspace = true }
+proptest = { workspace = true }
 
 [build-dependencies]
 serde_json = { workspace = true }

@@ -549,3 +549,6 @@ mod identity_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod oracle;
